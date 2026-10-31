@@ -81,6 +81,7 @@ static inline CGPoint CGPointZero_(void) { return CGPointMake(0, 0); }
 - (BOOL)isHidden;
 - (CALayer *)layer;
 - (void)addSubview:(UIView *)v;
+- (UIView *)superview;
 - (void)removeFromSuperview;
 - (void)bringSubviewToFront:(UIView *)v;
 - (void)setClipsToBounds:(BOOL)b;
@@ -170,6 +171,7 @@ typedef CGFloat UIWindowLevel;
 @end
 
 @interface UIWindowScene : UIScene
+- (NSArray *)windows;
 @end
 
 @interface UIScreen : NSObject
@@ -189,6 +191,9 @@ typedef CGFloat UIWindowLevel;
 - (void)setHidden:(BOOL)h;
 - (BOOL)isKeyWindow;
 - (BOOL)canBecomeKeyWindow;
+- (UIWindowScene *)windowScene;
+- (void)makeKeyWindow;
+- (BOOL)isHidden;
 - (UIView *)hitTest:(CGPoint)p withEvent:(id)e;
 @end
 
@@ -200,6 +205,21 @@ typedef CGFloat UIWindowLevel;
                    completion:(void (^)(void))done;
 - (void)dismissViewControllerAnimated:(BOOL)an
                            completion:(void (^)(void))done;
+@end
+
+typedef long UIAlertControllerStyle;
+
+@interface UIAlertController : UIViewController
++ (instancetype)alertControllerWithTitle:(NSString *)title
+                                 message:(NSString *)message
+                          preferredStyle:(UIAlertControllerStyle)style;
+- (void)addAction:(id)action;
+@end
+
+@interface UIAlertAction : NSObject
++ (instancetype)actionWithTitle:(NSString *)title
+                          style:(long)style
+                        handler:(void (^)(id))handler;
 @end
 
 @interface UIApplication : NSObject

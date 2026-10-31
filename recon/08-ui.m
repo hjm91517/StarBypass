@@ -16,7 +16,7 @@
 #import <UIKit/UIKit.h>
 
 // 远高于 alert 层，保证覆盖在最上面
-#define RC_WINDOW_LEVEL 10000000.0
+#define RC_WINDOW_LEVEL 30000000.0
 
 #pragma mark - 穿透视图
 
@@ -84,12 +84,40 @@ static UIView *rc_makeButton(NSString *title, SEL action, id target,
     return b;
 }
 
+// 取 key window：iOS 13+ 的 UIApplication.keyWindow 在 scene 架构下可能返回 nil，
+// 必须回落到 scene 的 windows 里找 isKeyWindow
+static UIWindow *rc_keyWindow(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (!app) return nil;
+
+    UIWindow *kw = [app keyWindow];
+    if (kw) return kw;
+
+    NSArray *scenes = [app connectedScenes];
+    if (scenes) {
+        for (id sc in scenes) {
+            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+            NSArray *wins = [(UIWindowScene *)sc windows];
+            if (!wins) continue;
+            for (id w in wins) {
+                if (![w isKindOfClass:[UIWindow class]]) continue;
+                UIWindow *win = (UIWindow *)w;
+                if ([win isKeyWindow]) return win;
+            }
+            // 没有 key 就退回第一个
+            for (id w in wins) {
+                if ([w isKindOfClass:[UIWindow class]]) return (UIWindow *)w;
+            }
+        }
+    }
+    return nil;
+}
+
 #pragma mark - 顶层 VC
 
 // 从 app 的 key window 找最上层 VC，用于弹出分享面板
 static UIViewController *rc_topViewController(void) {
-    UIApplication *app = [UIApplication sharedApplication];
-    UIWindow *kw = app ? [app keyWindow] : nil;
+    UIWindow *kw = rc_keyWindow();
     UIViewController *vc = kw ? [kw rootViewController] : nil;
     if (!vc) vc = [g_window rootViewController];
     return vc;
@@ -266,30 +294,100 @@ static SBBallCtrl *g_ctrl = nil;
 
 #pragma mark - 构建
 
-static void rc_buildUI(void) {
+static BOOL rc_buildUI(void) {
     CGRect sb = rc_screenBounds();
+    UIApplication *app = [UIApplication sharedApplication];
 
-    // ── window ──
+    // ── 选宿主窗口 ──
+    // 优先自建高层 window（能压过 app 自己的浮窗），失败则退化为挂到 app 的 keyWindow
     UIWindowScene *scene = rc_activeScene();
+    if (!scene && app) {
+        UIWindow *kw = rc_keyWindow();
+        if (kw) scene = [kw windowScene];
+    }
+
+    RC(@"[UI] scene=%@ keyWindow=%@",
+       scene ? NSStringFromClass([scene class]) : @"(nil)",
+       rc_keyWindow() ? @"有" : @"无");
+
+    UIWindow *hostWin = nil;
+
     if (scene) {
         g_window = [[SBWindow alloc] initWithWindowScene:scene];
+        hostWin = g_window;
+        RC(@"[UI] 用 initWithWindowScene 创建");
     } else {
         g_window = [[SBWindow alloc] initWithFrame:sb];
+        hostWin = g_window;
+        RC(@"[UI] 用 initWithFrame 创建（无 scene）");
     }
+
     if (!g_window) {
-        RC(@"[UI] window 创建失败");
-        return;
+        RC(@"!! window 创建失败");
+        return NO;
     }
 
-    [g_window setWindowLevel:RC_WINDOW_LEVEL];
-    [g_window setBackgroundColor:[UIColor clearColor]];
+    if (!scene) {
+        // 无 scene 时自建 window 在 iOS 13+ 往往不显示，直接退化为挂在 keyWindow
+        RC(@"[UI] 无 scene，改用 keyWindow 作为宿主");
+        g_window = nil;
+        hostWin = rc_keyWindow();
+        if (!hostWin) {
+            RC(@"!! keyWindow 也为空");
+            return NO;
+        }
+    }
 
-    UIViewController *vc = [[UIViewController alloc] init];
-    SBPassthroughView *host = [[SBPassthroughView alloc] initWithFrame:sb];
-    [host setBackgroundColor:[UIColor clearColor]];
-    [vc setView:host];
-    [g_window setRootViewController:vc];
+    UIView *hostView = nil;
+    CGRect hostBounds = sb;
 
+    if (g_window) {
+        [g_window setFrame:sb];
+        [g_window setWindowLevel:RC_WINDOW_LEVEL];
+        [g_window setBackgroundColor:[UIColor clearColor]];
+
+        UIViewController *vc = [[UIViewController alloc] init];
+        SBPassthroughView *v = [[SBPassthroughView alloc] initWithFrame:sb];
+        [v setBackgroundColor:[UIColor clearColor]];
+        [vc setView:v];
+        [g_window setRootViewController:vc];
+        hostView = v;
+
+        // 关键：先 makeKeyAndVisible 保证显示，再把 key 还给原窗口，避免抢焦点
+        UIWindow *prevKey = rc_keyWindow();
+        [g_window makeKeyAndVisible];
+        if (prevKey && prevKey != g_window && [prevKey canBecomeKeyWindow]) {
+            [prevKey makeKeyWindow];
+            RC(@"[UI] key 已归还给原窗口");
+        }
+        // 再确认一次可见
+        [g_window setHidden:NO];
+        RC(@"[UI] 自建 window level=%.0f hidden=%d",
+           (double)RC_WINDOW_LEVEL, (int)[g_window isHidden]);
+    } else {
+        // 挂在 app 的 keyWindow 上
+        UIViewController *rvc = [hostWin rootViewController];
+        UIView *base = rvc ? [rvc view] : hostWin;
+        if (!base) {
+            RC(@"!! keyWindow 无可用 view");
+            return NO;
+        }
+        hostBounds = [base bounds];
+        SBPassthroughView *v = [[SBPassthroughView alloc] initWithFrame:hostBounds];
+        [v setBackgroundColor:[UIColor clearColor]];
+        [base addSubview:v];
+        [base bringSubviewToFront:v];
+        hostView = v;
+        RC(@"[UI] 已挂到 keyWindow，host=%.0fx%.0f",
+           (double)hostBounds.size.width, (double)hostBounds.size.height);
+    }
+
+    if (!hostView) {
+        RC(@"!! 宿主 view 为空");
+        return NO;
+    }
+
+    sb = hostBounds;
     g_ctrl = [[SBBallCtrl alloc] init];
 
     // ── 悬浮球 ──
@@ -326,7 +424,7 @@ static void rc_buildUI(void) {
     [pan setCancelsTouchesInView:NO];
     [g_ball addGestureRecognizer:pan];
 
-    [host addSubview:g_ball];
+    [hostView addSubview:g_ball];
 
     // ── 面板 ──
     CGFloat pw = sb.size.width - 32;
@@ -378,29 +476,58 @@ static void rc_buildUI(void) {
     [[g_text layer] setMasksToBounds:YES];
     [panel addSubview:g_text];
 
-    [host addSubview:panel];
+    [hostView addSubview:panel];
     g_panel = panel;
 
     // 只显示，不抢 key window —— makeKeyAndVisible 会夺走 app 的键盘与输入焦点
-    [g_window setHidden:NO];
-
-    RC(@"[UI] 悬浮球已创建 level=%.0f 屏幕=%.0fx%.0f",
-       (double)RC_WINDOW_LEVEL, (double)sb.size.width, (double)sb.size.height);
+    RC(@"[UI] 悬浮球已创建 屏幕=%.0fx%.0f 位置=(%.0f,%.0f)",
+       (double)sb.size.width, (double)sb.size.height,
+       (double)g_ballRest.x, (double)g_ballRest.y);
+    return YES;
 }
 
 #pragma mark - 安装
 
-void RCInstallUIWindow(void) {
-    RCSection(@"应用内 UI");
+static int g_uiAttempts = 0;
 
-    if (g_window) {
+void RCInstallUIWindow(void) {
+    if (g_window || g_ball) {
         RC(@"UI 已存在，跳过");
         return;
     }
+    if (g_uiAttempts >= 6) {
+        RC(@"!! UI 重试 6 次仍失败，改为弹窗提示");
+        // 兜底提示：让用户知道 dylib 已经加载，只是 UI 起不来
+        UIApplication *app = [UIApplication sharedApplication];
+        UIWindow *kw = app ? [app keyWindow] : nil;
+        UIViewController *vc = kw ? [kw rootViewController] : nil;
+        if (vc) {
+            UIAlertController *al = [UIAlertController
+                alertControllerWithTitle:@"ReconDylib 已加载"
+                                 message:@"悬浮球创建失败，日志仍在写入文件。请把设备和系统版本告诉我。"
+                          preferredStyle:0];
+            [vc presentViewController:al animated:YES completion:nil];
+        }
+        return;
+    }
+    g_uiAttempts++;
 
-    rc_buildUI();
+    RCSection(@"应用内 UI");
+    RC(@"第 %d 次尝试创建", g_uiAttempts);
 
-    // 定时刷新面板内容
+    BOOL ok = NO;
+    RC_SAFE_BEGIN
+        ok = rc_buildUI();
+    RC_SAFE_END
+
+    if (!ok) {
+        RC(@"创建失败，0.5s 后重试");
+        RCAfterSec(0.5, ^{
+            RCInstallUIWindow();
+        });
+        return;
+    }
+
     if (g_refresh) [g_refresh invalidate];
     g_refresh = [NSTimer scheduledTimerWithTimeInterval:0.6
                                                  target:g_ctrl
@@ -408,4 +535,20 @@ void RCInstallUIWindow(void) {
                                                userInfo:nil
                                                 repeats:YES];
     RC(@"悬浮球就位：点开看日志，拖动可换位置");
+
+    // 2 秒后自检：球是否真的在视图树上
+    RCAfterSec(2.0, ^{
+        if (!g_ball) {
+            RC(@"!! 自检：球对象为空");
+            return;
+        }
+        UIView *sp = [g_ball superview];
+        RC(@"自检：ball.superview=%@ hidden=%d alpha=%.1f center=(%.0f,%.0f)",
+           sp ? NSStringFromClass([sp class]) : @"(nil)",
+           (int)[g_ball isHidden],
+           (double)[g_ball alpha],
+           (double)[g_ball center].x,
+           (double)[g_ball center].y);
+        if (!sp) RC(@"!! 自检：球已脱离视图树，UI 不会显示");
+    });
 }
