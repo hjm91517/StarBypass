@@ -1,0 +1,3 @@
+#ifndef SB_COMPAT_PTHREAD_H
+#define SB_COMPAT_PTHREAD_H
+#endif

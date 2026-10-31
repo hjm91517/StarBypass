@@ -1,0 +1,28 @@
+# 依赖清单 — StarBypass
+#
+# 本项目零第三方依赖。所有依赖均为系统自带组件。
+# 版本栏标注"系统提供"表示由 iOS 运行时保证，不单独锁版本。
+
+[构建工具]
+clang              >= 12      C/ObjC 编译器（Xcode 或 LLVM）
+ld64.lld           >= 14      Mach-O 链接器（交叉构建时需要）
+python3            >= 3.8     构建脚本
+
+[目标平台]
+platform           ios        iPhone OS
+arch               arm64      仅 arm64（不含 arm64e / x86_64）
+min_version        14.0       iOS 14.0
+
+[系统框架 — 系统提供]
+Foundation         -          NSURLProtocol / NSUserDefaults / NSJSONSerialization
+UIKit              -          UILabel / UITextView / UIButton / UIAlertController
+libobjc            -          objc runtime（class_copyMethodList 等）
+libSystem          -          libc / libdispatch / libmach
+
+[系统库 — 系统提供]
+CommonCrypto       -          CC_SHA256（运行时 dlsym 解析）
+Security           -          不直接使用
+
+[构建期无依赖]
+- 不引入 CocoaPods / SwiftPM / Carthage
+- 不使用第三方 hook 框架（fishhook 由 lib/symbol-rebind.c 自带实现）

@@ -1,0 +1,3 @@
+#ifndef SB_COMPAT_GETSECT_H
+#define SB_COMPAT_GETSECT_H
+#endif

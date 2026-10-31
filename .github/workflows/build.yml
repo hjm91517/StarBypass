@@ -1,0 +1,95 @@
+name: build-dylib
+
+# 用 macOS runner 的官方 iPhoneOS SDK 构建。
+# 本地交叉构建需要手工注入 LC_LOAD_DYLIB / -no_fixup_chains 等补救，
+# 这里全部不需要：标准链接器直接产出可加载的 dylib。
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          echo "SDK: $(xcrun -sdk iphoneos --show-sdk-version)"
+          echo "clang: $(xcrun -sdk iphoneos clang --version | head -1)"
+
+      - name: Contract check
+        run: python3 docs/verify-contracts.py
+
+      - name: Build StarBypass.dylib
+        run: |
+          set -euo pipefail
+          cd src
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
+            -miphoneos-version-min=14.0 \
+            -fblocks -fno-objc-arc -O2 \
+            -Wall -Wextra \
+            -Wno-unused-parameter -Wno-deprecated-declarations \
+            -I. -Ilib \
+            -dynamiclib \
+            -install_name @executable_path/Frameworks/StarBypass.dylib \
+            -framework Foundation \
+            -framework UIKit \
+            -lobjc -lSystem \
+            -Wl,-no_fixup_chains \
+            01-shared.m \
+            02-diagnose.m \
+            03-network.m \
+            04-license.m \
+            05-detection.m \
+            06-guard.m \
+            07-bootstrap.m \
+            lib/symbol-rebind.c \
+            -o StarBypass.dylib
+          echo "--- 产物 ---"
+          file StarBypass.dylib
+          ls -l StarBypass.dylib
+
+      - name: Verify binary structure
+        run: |
+          python3 src/tools/verify-binary.py src/StarBypass.dylib
+
+      - name: Show load commands
+        run: |
+          otool -L src/StarBypass.dylib || true
+          echo "--- 构造函数 ---"
+          otool -l src/StarBypass.dylib | grep -A3 __mod_init_func || true
+
+      - name: Ad-hoc sign
+        run: |
+          codesign --force --sign - src/StarBypass.dylib || true
+          codesign -dv src/StarBypass.dylib 2>&1 | head -5 || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StarBypass-dylib
+          path: src/StarBypass.dylib
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          {
+            echo "### 构建完成"
+            echo ""
+            echo '```'
+            file src/StarBypass.dylib
+            ls -l src/StarBypass.dylib
+            echo '```'
+            echo ""
+            echo "产物已上传为 artifact：\`StarBypass-dylib\`"
+          } >> "$GITHUB_STEP_SUMMARY"
