@@ -89,15 +89,18 @@ def check_file(path):
         oks.append(f"W5 {len(refs)} 个脚本引用全部存在")
 
     # W6 构建源文件
-    srcs = re.findall(r"^\s+([\w./-]+\.(?:m|c))\s*\\?$", text, re.M)
+    srcs = re.findall(r"([\w./-]+\.(?:m|c))\b", text)
     if srcs:
-        base = ROOT / "src"
-        miss = [s for s in srcs if not (base / s).exists()
-                and not (base / "lib" / s).exists()]
+        uniq = sorted(set(srcs))
+        miss = [s for s in uniq
+                if not (ROOT / s).exists()
+                and not (ROOT / "src" / s).exists()
+                and not (ROOT / "recon" / s).exists()
+                and not (ROOT / "src" / "lib" / s).exists()]
         if miss:
             fails.append(f"W6 构建源文件不存在: {', '.join(miss)}")
         else:
-            oks.append(f"W6 {len(srcs)} 个构建源文件全部存在")
+            oks.append(f"W6 {len(uniq)} 个构建源文件全部存在")
 
     return fails, oks
 

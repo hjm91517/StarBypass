@@ -1,0 +1,107 @@
+name: recon-build
+
+# 侦察版重建 + 用官方 iPhoneOS SDK 做真机编译验证。
+# 本地只有桩头文件，真 SDK 编译是本项目唯一能证明「真的能编过」的手段。
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          echo "SDK: $(xcrun -sdk iphoneos --show-sdk-version)"
+          xcrun -sdk iphoneos clang --version | head -1
+
+      # ── 静态检查（不依赖 SDK） ──
+      - name: Source lint
+        run: python3 recon/tools/lint-recon.py
+
+      - name: Contract check
+        run: python3 docs/verify-contracts.py
+
+      # ── 真 SDK 编译：这是关键一步 ──
+      - name: Build with real iPhoneOS SDK
+        run: |
+          set -euo pipefail
+          cd recon
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
+            -miphoneos-version-min=14.0 \
+            -fblocks -fobjc-arc -O2 \
+            -Wall -Wextra \
+            -Wno-unused-parameter -Wno-deprecated-declarations \
+            -I. -I../src -I../src/lib \
+            -dynamiclib \
+            -install_name @executable_path/Frameworks/ReconDylib.dylib \
+            -framework Foundation \
+            -framework UIKit \
+            -lobjc -lSystem \
+            -Wl,-no_fixup_chains \
+            01-shared.m 02-capture.m 03-trace.m 04-ui.m \
+            05-stealth.m 06-guard.m 07-bootstrap.m 08-ui.m \
+            ../src/lib/symbol-rebind.c \
+            -o ReconDylib.dylib
+          file ReconDylib.dylib
+          ls -l ReconDylib.dylib
+
+      # ── 结构校验 ──
+      - name: Verify binary
+        id: verify
+        continue-on-error: true
+        run: |
+          python3 src/tools/verify-binary.py recon/ReconDylib.dylib | tee /tmp/v.txt
+          exit ${PIPESTATUS[0]}
+
+      # ── ARC 运行时符号检查：确认没有遗漏的 MRR 写法 ──
+      - name: Check ARC runtime symbols
+        run: |
+          echo "=== 与 ARC 相关的导入符号 ==="
+          nm -u recon/ReconDylib.dylib | grep -E 'objc_(retain|release|storeStrong|autorelease|retainBlock)' || true
+          echo "=== 危险符号（应为空） ==="
+          nm -u recon/ReconDylib.dylib | grep -E '_dispatch_|_dyld_|_NSLog|_CC_SHA256' && \
+            echo "!! 发现危险符号" && exit 1 || echo "OK 无危险符号"
+
+      - name: Load commands
+        run: |
+          otool -L recon/ReconDylib.dylib || true
+          echo "--- 构造函数 ---"
+          otool -l recon/ReconDylib.dylib | grep -A3 __mod_init_func || true
+
+      - name: Ad-hoc sign
+        run: codesign --force --sign - recon/ReconDylib.dylib || true
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReconDylib
+          path: recon/ReconDylib.dylib
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          {
+            echo "### recon-build"
+            echo ""
+            echo "| 项 | 结果 |"
+            echo "|---|---|"
+            echo "| 源码 lint | pass |"
+            echo "| 契约检查 | pass |"
+            echo "| 真 SDK 编译 | pass |"
+            echo "| 结构校验 | ${{ steps.verify.outcome }} |"
+            echo ""
+            echo '```'
+            file recon/ReconDylib.dylib
+            ls -l recon/ReconDylib.dylib
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
