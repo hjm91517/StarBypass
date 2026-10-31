@@ -21,7 +21,8 @@ SRCS := \
   04-ui.m \
   05-stealth.m \
   06-guard.m \
-  07-bootstrap.m
+  07-bootstrap.m \
+  08-ui.m
 
 OBJS := $(patsubst %.m,$(OBJ)/%.o,$(SRCS)) $(OBJ)/symbol-rebind.o
 

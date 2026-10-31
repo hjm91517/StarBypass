@@ -14,6 +14,10 @@ static size_t g_written = 0;
 static volatile int g_logLock = 0;
 static BOOL g_logFull = NO;
 
+// 内存日志：给应用内 UI 面板读取，避免频繁读文件
+static NSMutableString *g_memLog = nil;
+#define RC_MEM_MAX 300000
+
 static void rc_lock(void) { while (__sync_lock_test_and_set(&g_logLock, 1)) {} }
 static void rc_unlock(void) { __sync_lock_release(&g_logLock); }
 
@@ -104,8 +108,17 @@ void RCLog(NSString *fmt, ...) {
     if (!done) { p_log = (PFN_NSLog)RCSym("NSLog"); done = 1; }
     if (p_log) p_log(@"[Recon] %@", msg);
 
-    // 落盘
+    // 落盘 + 内存副本
     rc_lock();
+    {
+        if (!g_memLog) g_memLog = [NSMutableString string];
+        [g_memLog appendString:line];
+        NSUInteger over = g_memLog.length;
+        if (over > RC_MEM_MAX) {
+            [g_memLog deleteCharactersInRange:
+                NSMakeRange(0, over - RC_MEM_MAX)];
+        }
+    }
     if (g_logFile && !g_logFull) {
         NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
         if (d && d.length) {
@@ -119,6 +132,26 @@ void RCLog(NSString *fmt, ...) {
             }
             fflush(g_logFile);
         }
+    }
+    rc_unlock();
+}
+
+NSString *RCMemLogSnapshot(void) {
+    NSString *copy = nil;
+    rc_lock();
+    copy = g_memLog ? [g_memLog copy] : @"";
+    rc_unlock();
+    return copy ? copy : @"";
+}
+
+void RCMemLogClear(void) {
+    rc_lock();
+    g_memLog = [NSMutableString string];
+    if (g_logFile) {
+        fclose(g_logFile);
+        g_logFile = fopen(g_logPath, "w");
+        g_written = 0;
+        g_logFull = NO;
     }
     rc_unlock();
 }

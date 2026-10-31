@@ -102,12 +102,16 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 - (BOOL)containsString:(NSString *)s;
 - (NSArray *)componentsSeparatedByString:(NSString *)sep;
 - (NSData *)dataUsingEncoding:(NSUInteger)enc;
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)a encoding:(NSUInteger)e error:(id *)err;
 @end
 
 @interface NSMutableString : NSString
++ (instancetype)string;
 + (instancetype)stringWithCapacity:(NSUInteger)c;
 - (void)appendFormat:(NSString *)f, ...;
 - (void)appendString:(NSString *)s;
+- (void)deleteCharactersInRange:(NSRange)r;
+- (NSString *)copy;
 @end
 
 @interface NSData : NSObject
@@ -135,6 +139,7 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 - (NSString *)componentsJoinedByString:(NSString *)sep;
 - (NSArray *)subarrayWithRange:(NSRange)r;
 - (id)mutableCopy;
+- (id)copy;
 @end
 
 @interface NSMutableArray : NSArray
@@ -183,6 +188,7 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 @interface NSURL : NSObject
 + (instancetype)URLWithString:(NSString *)s;
 - (NSString *)absoluteString;
++ (instancetype)fileURLWithPath:(NSString *)p;
 - (NSString *)path;
 @end
 
@@ -265,6 +271,14 @@ typedef NSUInteger NSURLCacheStoragePolicy;
 - (void)setProtocolClasses:(NSArray *)a;
 - (void)setTimeoutIntervalForRequest:(double)t;
 @end
+@interface NSTimer : NSObject
++ (NSTimer *)scheduledTimerWithTimeInterval:(double)t
+                                   target:(id)target
+                                 selector:(SEL)sel
+                                 userInfo:(id)info
+                                  repeats:(BOOL)r;
+- (void)invalidate;
+@end
 @interface NSThread : NSObject
 + (NSThread *)currentThread;
 - (NSArray *)callStackSymbols;
@@ -306,4 +320,5 @@ extern NSString *NSStringFromSelector(SEL s);
 @end
 extern NSString *NSTemporaryDirectory(void);
 extern NSString *NSHomeDirectory(void);
+extern NSString *NSRunLoopCommonModes;
 #endif

@@ -7,6 +7,7 @@ extern void RCInstallStealth(void);
 extern void RCInstallCapture(void);
 extern void RCInstallTrace(void);
 extern void RCInstallUI(void);
+extern void RCInstallUIWindow(void);
 
 static void rc_banner(void) {
     NSBundle *b = [NSBundle mainBundle];
@@ -35,6 +36,11 @@ static void rc_boot(void) {
     RCInstallCapture();
     RCInstallTrace();
     RCInstallUI();
+
+    // UI 放到稍后：构造期创建 window 太早，等 app 自己的 window 就绪
+    RCAfterSec(1.0, ^{
+        RCInstallUIWindow();
+    });
 
     RCSection(@"装配完成，请触发一次卡密验证");
     RC(@"日志实时写入: %@", RCLogPath() ? RCLogPath() : @"(仅 NSLog)");

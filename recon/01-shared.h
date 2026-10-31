@@ -30,6 +30,12 @@ BOOL RCOpenLog(void);
 // 强制刷盘
 void RCFlush(void);
 
+// 内存日志快照（供应用内面板显示，与文件日志内容一致）
+NSString *RCMemLogSnapshot(void);
+
+// 清空内存日志（同时清空文件）
+void RCMemLogClear(void);
+
 #pragma mark - 异常包裹
 
 #define RC_SAFE_BEGIN @try {
