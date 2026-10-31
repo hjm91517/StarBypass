@@ -5,6 +5,7 @@
 // 不改写任何文案，user 看到的就是原始行为。
 
 #import "01-shared.h"
+#import <UIKit/UIKit.h>
 
 static NSArray *rc_keywords(void) {
     return @[@"不存在", @"失败", @"错误", @"无效", @"过期", @"未授权",
@@ -78,6 +79,16 @@ static void rc_buttonSetTitle(id self, SEL _cmd, NSString *title, NSUInteger sta
 
 typedef id (*PFN_ALERT)(Class, SEL, NSString *, NSString *, long);
 
+// 把日志复制到剪贴板（供 UI 起不来时使用）
+static void rc_copyLogToPasteboard(void) {
+    NSString *snap = RCMemLogSnapshot();
+    UIPasteboard *pb = [UIPasteboard generalPasteboard];
+    if (pb && snap) {
+        [pb setString:snap];
+        RC(@"[UI] 已通过弹窗复制日志 %lu 字符", (unsigned long)snap.length);
+    }
+}
+
 static id rc_alertCreate(Class cls, SEL _cmd, NSString *title,
                          NSString *message, long style) {
     static PFN_ALERT orig = NULL;
@@ -87,9 +98,32 @@ static id rc_alertCreate(Class cls, SEL _cmd, NSString *title,
                     @"alertControllerWithTitle:message:preferredStyle:");
         done = 1;
     }
+
     if (rc_isInteresting(title)) rc_report(title, "UIAlert.title");
     if (rc_isInteresting(message)) rc_report(message, "UIAlert.message");
-    return orig ? orig(cls, _cmd, title, message, style) : nil;
+
+    RC(@"■ 弹出 UIAlert: title=%@ message=%@", RCDescribe(title), RCDescribe(message));
+
+    id alert = orig ? orig(cls, _cmd, title, message, style) : nil;
+
+    // 关键：在这个 alert 上加一个日志按钮。
+    // 这样即使悬浮球起不来，也有稳定的日志出口。
+    if (alert) {
+        RC_SAFE_BEGIN
+            NSString *mark = [NSString stringWithFormat:@"[R] %@",
+                              title ? title : @"FlashByte"];
+            [alert setTitle:mark];
+
+            UIAlertAction *act = [UIAlertAction
+                actionWithTitle:@"📋 复制日志"
+                          style:0
+                        handler:^(id a) {
+                rc_copyLogToPasteboard();
+            }];
+            [alert addAction:act];
+        RC_SAFE_END
+    }
+    return alert;
 }
 
 #pragma mark - 安装

@@ -16,7 +16,7 @@
 #import <UIKit/UIKit.h>
 
 // 远高于 alert 层，保证覆盖在最上面
-#define RC_WINDOW_LEVEL 30000000.0
+#define RC_WINDOW_LEVEL 10000.0
 
 #pragma mark - 穿透视图
 
@@ -53,6 +53,9 @@ static NSTimer *g_refresh = nil;
 static CGPoint g_ballRest = {0, 0};
 static BOOL g_panelOpen = NO;
 
+// present 触发时抓到的真实 window，作为 rc_keyWindow 的兜底来源
+static UIWindow *g_lastWindow = nil;
+
 #pragma mark - 工具
 
 static CGRect rc_screenBounds(void) {
@@ -63,6 +66,13 @@ static CGRect rc_screenBounds(void) {
 static UIWindowScene *rc_activeScene(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return nil;
+
+    // 优先用 present 时机抓到的那个 window 的 scene
+    if (g_lastWindow) {
+        UIWindowScene *ws = [g_lastWindow windowScene];
+        if (ws) return ws;
+    }
+
     NSArray *scenes = [app connectedScenes];
     if (!scenes || scenes.count == 0) return nil;
     for (id s in scenes) {
@@ -92,6 +102,20 @@ static UIWindow *rc_keyWindow(void) {
 
     UIWindow *kw = [app keyWindow];
     if (kw) return kw;
+
+    if (g_lastWindow) return g_lastWindow;
+
+    // 老 API，scene 架构下仍可能返回可用的窗口列表
+    NSArray *allWins = [app windows];
+    if (allWins) {
+        for (id w in allWins) {
+            if ([w isKindOfClass:[UIWindow class]] &&
+                [(UIWindow *)w isKeyWindow]) return (UIWindow *)w;
+        }
+        for (id w in allWins) {
+            if ([w isKindOfClass:[UIWindow class]]) return (UIWindow *)w;
+        }
+    }
 
     NSArray *scenes = [app connectedScenes];
     if (scenes) {
@@ -486,6 +510,43 @@ static BOOL rc_buildUI(void) {
     return YES;
 }
 
+#pragma mark - 前置声明
+
+void RCInstallUIWindow(void);
+
+#pragma mark - present 时机接管
+
+// app 弹出卡密验证 alert 时，必定已经有可用的 window。
+// 用这个时机抓 window 并补建 UI，比轮询可靠。
+static void rc_presentVC(id self, SEL _cmd, UIViewController *vc,
+                         BOOL animated, void (^completion)(void)) {
+    typedef void (*PFN)(id, SEL, UIViewController *, BOOL, void (^)(void));
+    static PFN orig = NULL;
+    static int done = 0;
+    if (!done) {
+        orig = (PFN)RCOrigIMP(@"UIViewController",
+                    @"presentViewController:animated:completion:");
+        done = 1;
+    }
+
+    if (orig) orig(self, _cmd, vc, animated, completion);
+
+    RC_SAFE_BEGIN
+        UIView *v = [self view];
+        UIWindow *w = v ? [v window] : nil;
+        if (w) {
+            g_lastWindow = w;
+            RC(@"[UI] present 抓到 window=%@", NSStringFromClass([w class]));
+            if (!g_ball) {
+                RC(@"[UI] 此时补建 UI");
+                RCAfterSec(0.4, ^{ RCInstallUIWindow(); });
+            }
+        } else {
+            RC(@"[UI] present 但拿不到 window");
+        }
+    RC_SAFE_END
+}
+
 #pragma mark - 安装
 
 static int g_uiAttempts = 0;
@@ -495,8 +556,8 @@ void RCInstallUIWindow(void) {
         RC(@"UI 已存在，跳过");
         return;
     }
-    if (g_uiAttempts >= 6) {
-        RC(@"!! UI 重试 6 次仍失败，改为弹窗提示");
+    if (g_uiAttempts >= 30) {
+        RC(@"!! UI 重试 30 次仍失败");
         // 兜底提示：让用户知道 dylib 已经加载，只是 UI 起不来
         UIApplication *app = [UIApplication sharedApplication];
         UIWindow *kw = app ? [app keyWindow] : nil;
@@ -521,11 +582,20 @@ void RCInstallUIWindow(void) {
     RC_SAFE_END
 
     if (!ok) {
-        RC(@"创建失败，0.5s 后重试");
-        RCAfterSec(0.5, ^{
+        RC(@"创建失败，1s 后重试");
+        RCAfterSec(1.0, ^{
             RCInstallUIWindow();
         });
         return;
+    }
+
+    // 挂 present hook（只挂一次）
+    static int presentHooked = 0;
+    if (!presentHooked) {
+        presentHooked = 1;
+        RCHookInstance(NSClassFromString(@"UIViewController"),
+                       @selector(presentViewController:animated:completion:),
+                       (IMP)rc_presentVC);
     }
 
     if (g_refresh) [g_refresh invalidate];

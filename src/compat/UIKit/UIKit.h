@@ -82,6 +82,7 @@ static inline CGPoint CGPointZero_(void) { return CGPointMake(0, 0); }
 - (CALayer *)layer;
 - (void)addSubview:(UIView *)v;
 - (UIView *)superview;
+- (UIWindow *)window;
 - (void)removeFromSuperview;
 - (void)bringSubviewToFront:(UIView *)v;
 - (void)setClipsToBounds:(BOOL)b;
@@ -198,6 +199,8 @@ typedef CGFloat UIWindowLevel;
 @end
 
 @interface UIViewController : NSObject
+- (void)setTitle:(NSString *)t;
+- (NSString *)title;
 - (UIView *)view;
 - (void)setView:(UIView *)v;
 - (void)presentViewController:(UIViewController *)c
@@ -225,6 +228,7 @@ typedef long UIAlertControllerStyle;
 @interface UIApplication : NSObject
 + (UIApplication *)sharedApplication;
 - (NSArray *)connectedScenes;
+- (NSArray *)windows;
 - (id)keyWindow;
 @end
 
