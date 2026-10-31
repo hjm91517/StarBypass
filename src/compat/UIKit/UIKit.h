@@ -6,6 +6,12 @@
 
 #include <Foundation/Foundation.h>
 
+@interface UIDevice : NSObject
++ (instancetype)currentDevice;
+- (NSString *)systemVersion;
+- (NSString *)model;
+@end
+
 @interface UIView : NSObject
 @end
 

@@ -1,5 +1,14 @@
 # FlashBytePro 注入库
 
+两个独立产物，分两阶段：
+
+| 产物 | 用途 | 状态 |
+|---|---|---|
+| `recon/ReconDylib.dylib` | **阶段一**：纯观测，抓真实接口/回包/失败文案来源 | 可交付 |
+| `src/StarBypass.dylib` | **阶段二**：绕过卡密验证 | 待阶段一数据回来后定稿 |
+
+阶段一先跑，拿到真实数据，阶段二才能一次改对，不再猜字段。
+
 对抗一个字符串全加密、控制流被 VM 平坦化的授权系统。四层接管：网络伪造、布尔接管、文案改写、检测绕过。
 
 产物：`src/StarBypass.dylib`（arm64，115,176 字节，build `SB-20261031-DOUBLE`）
@@ -101,6 +110,17 @@ cd src && frida -U -f com.shadow.h5ggapp -l tools/dynamic-recon.js
 │   ├── 04-dynamic-recon.md     动态逆向方法与对照表
 │   ├── 05-ci.md                CI 构建与权限要求
 │   └── verify-contracts.py     契约检查器
+├── recon/                      侦察版（阶段一）
+│   ├── README.md               装法与日志取法
+│   ├── Makefile
+│   ├── 00-config.h
+│   ├── 01-shared.h/.m          日志落盘 + hook 工具
+│   ├── 02-capture.m            网络明文捕获
+│   ├── 03-trace.m              方法表 dump + 调用追踪
+│   ├── 04-ui.m                 文案 + 调用栈
+│   ├── 05-stealth.m            隐藏自身 / 检测绕过
+│   ├── 06-guard.m  07-bootstrap.m
+│   └── ReconDylib.dylib        产物
 ├── assets/
 │   ├── FlashBytePro.dylib      原始二进制（只读）
 │   └── verify-original.py      指纹校验

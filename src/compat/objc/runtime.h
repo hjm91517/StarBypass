@@ -26,6 +26,7 @@ extern Method *class_copyMethodList(Class cls, unsigned int *outCount);
 extern IMP method_getImplementation(Method m);
 extern SEL method_getName(Method m);
 extern const char *method_getTypeEncoding(Method m);
+extern unsigned int method_getNumberOfArguments(Method m);
 
 extern IMP class_replaceMethod(Class cls, SEL sel, IMP imp, const char *types);
 extern BOOL class_respondsToSelector(Class cls, SEL sel);

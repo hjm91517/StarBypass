@@ -17,8 +17,11 @@ typedef long NSInteger;
 typedef unsigned long NSUInteger;
 typedef double NSTimeInterval;
 typedef NSUInteger NSStringEncoding;
+typedef struct { NSUInteger location, length; } NSRange;
+static inline NSRange NSMakeRange(NSUInteger l, NSUInteger n) { NSRange r; r.location=l; r.length=n; return r; }
 
 #define NSUTF8StringEncoding 4
+#define NSJSONWritingPrettyPrinted 1
 #define NSEC_PER_SEC 1000000000ull
 
 typedef struct { NSUInteger __x; } dispatch_once_t;
@@ -41,7 +44,7 @@ extern void CFRelease(const void *);
 extern int printf(const char *, ...);
 extern char *strcasestr(const char *, const char *);
 
-@class NSString, NSNumber, NSArray, NSDictionary, NSMutableDictionary, NSSet;
+@class NSDate, NSString, NSNumber, NSArray, NSDictionary, NSMutableDictionary, NSSet;
 @class NSData, NSError, NSException, NSURL;
 
 @protocol NSObject
@@ -59,6 +62,7 @@ __attribute__((objc_root_class))
 - (BOOL)respondsToSelector:(SEL)s;
 - (BOOL)isKindOfClass:(Class)c;
 - (id)performSelector:(SEL)s;
+- (NSString *)description;
 @end
 
 @interface NSException : NSObject
@@ -78,7 +82,11 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 + (instancetype)stringWithFormat:(NSString *)f, ...;
 - (instancetype)initWithFormat:(NSString *)f arguments:(va_list)ap;
 - (instancetype)initWithData:(NSData *)d encoding:(NSUInteger)enc;
+- (NSString *)stringByAppendingPathComponent:(NSString *)c;
 - (NSString *)lowercaseString;
+- (NSString *)stringByAppendingString:(NSString *)a;
+- (NSString *)substringToIndex:(NSUInteger)i;
+- (NSString *)substringFromIndex:(NSUInteger)i;
 - (NSString *)uppercaseString;
 - (NSString *)stringByTrimmingCharactersInSet:(id)set;
 - (NSString *)stringByRemovingPercentEncoding;
@@ -109,6 +117,7 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 - (instancetype)initWithData:(NSData *)d;
 - (instancetype)initWithBase64EncodedString:(NSString *)s options:(NSUInteger)o;
 - (NSString *)base64EncodedStringWithOptions:(NSUInteger)o;
+- (NSData *)subdataWithRange:(NSRange)r;
 @end
 
 @interface NSArray : NSObject
@@ -124,6 +133,7 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 - (BOOL)containsObject:(id)o;
 - (NSUInteger)countByEnumeratingWithState:(void *)st objects:(id *)b count:(NSUInteger)len;
 - (NSString *)componentsJoinedByString:(NSString *)sep;
+- (NSArray *)subarrayWithRange:(NSRange)r;
 - (id)mutableCopy;
 @end
 
@@ -166,6 +176,7 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 @end
 
 @interface NSError : NSObject
+- (NSInteger)code;
 - (NSString *)localizedDescription;
 @end
 
@@ -178,6 +189,7 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 @interface NSURLRequest : NSObject
 + (instancetype)requestWithURL:(NSURL *)u;
 - (NSURL *)URL;
+- (NSDictionary *)allHTTPHeaderFields;
 - (NSData *)HTTPBody;
 - (NSString *)HTTPMethod;
 - (void)setHTTPBody:(NSData *)d;
@@ -193,6 +205,7 @@ extern void NSSetUncaughtExceptionHandler(void (*)(NSException *));
 @interface NSURLResponse : NSObject
 - (NSURL *)URL;
 - (NSInteger)statusCode;
+- (NSDictionary *)allHeaderFields;
 @end
 
 @interface NSHTTPURLResponse : NSURLResponse
@@ -272,4 +285,25 @@ extern NSString *NSStringFromClass(Class c);
 extern NSString *NSStringFromSelector(SEL s);
 
 #endif
+@interface NSBundle : NSObject
++ (NSBundle *)mainBundle;
+- (NSDictionary *)infoDictionary;
+@end
+@interface NSDate : NSObject
++ (NSDate *)date;
+@end
+@interface NSDateFormatter : NSObject
+- (void)setDateFormat:(NSString *)f;
+- (NSString *)stringFromDate:(NSDate *)d;
+@end
+
+@interface NSFileManager : NSObject
++ (NSFileManager *)defaultManager;
+- (BOOL)createDirectoryAtPath:(NSString *)p
+  withIntermediateDirectories:(BOOL)c
+                   attributes:(NSDictionary *)a
+                        error:(id *)e;
+@end
+extern NSString *NSTemporaryDirectory(void);
+extern NSString *NSHomeDirectory(void);
 #endif
