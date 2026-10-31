@@ -43,7 +43,7 @@ LDFLAGS_CROSS := -dylib -arch $(ARCH) -platform_version ios $(IOS_MIN) $(IOS_MIN
                  -install_name @executable_path/Frameworks/$(TARGET) \
                  -undefined dynamic_lookup
 
-.PHONY: all ios cross check verify clean help
+.PHONY: all ios cross check verify lint clean help
 
 all: cross
 
@@ -52,6 +52,8 @@ help:
 	@echo "make cross   交叉构建（无 SDK）"
 	@echo "make check   语法校验"
 	@echo "make verify  产物校验"
+	@echo "make lint    源码静态检查（选择器/判空/限流）"
+	@echo "make check   语法校验"
 	@echo "make clean   清理"
 
 ios:
@@ -80,6 +82,10 @@ check:
 	  clang -fsyntax-only $(CFLAGS_CROSS) -x objective-c $$f && echo OK || exit 1; \
 	done
 	@echo "语法校验全部通过"
+
+# 源码静态检查：选择器拼错、hook 未判空、静态 dispatch 引用、定时器 selector 等
+lint:
+	python3 tools/lint-recon.py
 
 verify:
 	python3 $(SRC_ROOT)/tools/verify-binary.py $(TARGET)

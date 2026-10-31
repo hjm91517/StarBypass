@@ -114,8 +114,10 @@ static id rc_alertCreate(Class cls, SEL _cmd, NSString *title,
                               title ? title : @"FlashByte"];
             [alert setTitle:mark];
 
+            NSString *btn = [NSString stringWithFormat:
+                             @"📋 复制日志 %s", RC_CFG_UI_TAG];
             UIAlertAction *act = [UIAlertAction
-                actionWithTitle:@"📋 复制日志"
+                actionWithTitle:btn
                           style:0
                         handler:^(id a) {
                 rc_copyLogToPasteboard();

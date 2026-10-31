@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <time.h>
 
 #pragma mark - 日志落盘
 
@@ -16,6 +17,12 @@ static BOOL g_logFull = NO;
 
 // 内存日志：给应用内 UI 面板读取，避免频繁读文件
 static NSMutableString *g_memLog = nil;
+
+// 日志限流：每秒最多 500 条，防止高频方法调用把主线程拖死
+static time_t g_secMark = 0;
+static int    g_secCount = 0;
+static int    g_secDropped = 0;
+#define RC_RATE_PER_SEC 500
 #define RC_MEM_MAX 300000
 
 static void rc_lock(void) { while (__sync_lock_test_and_set(&g_logLock, 1)) {} }
@@ -100,6 +107,24 @@ void RCLog(NSString *fmt, ...) {
 
     NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
                       rc_timestamp(), msg];
+
+    // 限流检查
+    time_t now = time(NULL);
+    if (now != g_secMark) {
+        if (g_secDropped > 0) {
+            NSString *note = [NSString stringWithFormat:
+                @"[%@] (上一秒丢弃 %d 条日志)\n", rc_timestamp(), g_secDropped];
+            g_secDropped = 0;
+            (void)note;
+        }
+        g_secMark = now;
+        g_secCount = 0;
+    }
+    g_secCount++;
+    if (g_secCount > RC_RATE_PER_SEC) {
+        g_secDropped++;
+        return;
+    }
 
     // NSLog：dlsym 取得，避免 flat namespace 绑定
     typedef void (*PFN_NSLog)(NSString *, ...);
@@ -267,6 +292,11 @@ NSString *RCDataToText(NSData *data) {
             return [[s substringToIndex:RC_CFG_BODY_MAX]
                     stringByAppendingString:@"...(截断)"];
         }
+        // 超大 body 不解析 JSON，避免主线程卡顿
+        if (data.length > 262144) {
+            return [s substringToIndex:RC_CFG_BODY_MAX];
+        }
+
         // 尝试格式化 JSON，便于阅读
         NSString *trim = [s stringByTrimmingCharactersInSet:
                           [NSCharacterSet whitespaceAndNewlineCharacterSet]];

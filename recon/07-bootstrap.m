@@ -8,6 +8,7 @@ extern void RCInstallCapture(void);
 extern void RCInstallTrace(void);
 extern void RCInstallUI(void);
 extern void RCInstallUIWindow(void);
+extern void RCInstallUIPresentHook(void);
 
 static void rc_banner(void) {
     NSBundle *b = [NSBundle mainBundle];
@@ -32,13 +33,14 @@ static void rc_boot(void) {
     rc_banner();
 
     RCInstallGuard();
+    RCInstallUIPresentHook();
     RCInstallStealth();
     RCInstallCapture();
     RCInstallTrace();
     RCInstallUI();
 
-    // UI 放到稍后：构造期创建 window 太早，等 app 自己的 window 就绪
-    RCAfterSec(1.0, ^{
+    // UI：立刻试一次，失败会自动重试（内部每 1.5s 一次，最多 60 次）
+    RCAfterSec(0.3, ^{
         RCInstallUIWindow();
     });
 

@@ -7,6 +7,11 @@
 #define RC_CFG_BUILD_ID "RECON-20261031"
 #endif
 
+// UI 版本标记（显示在悬浮球与弹窗按钮上，用于确认加载的是哪一版）
+#ifndef RC_CFG_UI_TAG
+#define RC_CFG_UI_TAG "v3"
+#endif
+
 // 日志文件名
 #ifndef RC_CFG_LOG_NAME
 #define RC_CFG_LOG_NAME "StarRecon.log"

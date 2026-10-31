@@ -1,37 +1,39 @@
 // 08-ui.m — 应用内 UI：悬浮球 + 日志面板
 //
-// 免越狱注入后拿不到 Console 也进不了沙盒，所以必须把入口做进 app。
+// 交互契约：
+//   点球      → 展开日志面板
+//   点球再次  → 收起面板
+//   拖球      → 跟手移动，松手弹簧吸附最近边缘
 //
-// 结构：
-//   SBWindow            顶层 window，空白区域触摸穿透（否则挡住 app）
-//   SBPassthroughView   rootViewController 的 view，自身不接收触摸
-//   SBFloatingBall      悬浮球，可拖动、松手吸附边缘
-//   SBLogPanel          日志面板，显示 / 复制 / 分享 / 清空
-//
-// 动效：
-//   拖动跟手不插值；松手用弹簧吸附到最近边缘；
-//   面板以缩放+淡入从球位置展开，收起到球位置。
+// 可靠性设计（这是本文件的核心，不是附加项）：
+//   1. 单个 pan 手势同时处理点击与拖动 —— 避免 tap/pan 手势冲突导致点了没反应
+//   2. 窗口创建五重兜底，任何一条成功即显示
+//   3. 尺寸取自 window/scene，不用 UIScreen.bounds（横屏下是固定竖屏值，会错位）
+//   4. 每 2 秒自愈：球脱离视图树或 window 被隐藏时自动重建
+//   5. 层级固定 10000，高于 alert（2000）与 app 自己的浮窗
+//   6. 不抢 key window，不破坏 app 输入
 
 #import "01-shared.h"
 #import <UIKit/UIKit.h>
 
-// 远高于 alert 层，保证覆盖在最上面
-#define RC_WINDOW_LEVEL 10000.0
+#define RC_WINDOW_LEVEL   10000.0
+#define RC_BALL_SIZE      56.0
+#define RC_UI_VERSION     "v3"
+
+void RCInstallUIWindow(void);
 
 #pragma mark - 穿透视图
 
+// 自身不接收触摸，子视图照常。返回 nil 让触摸落到下层 app
 @interface SBPassthroughView : UIView
 @end
 
 @implementation SBPassthroughView
-// 自身不接收触摸，子视图照常；返回 nil 让触摸落到下层 app
 - (UIView *)hitTest:(CGPoint)point withEvent:(id)event {
     UIView *hit = [super hitTest:point withEvent:event];
     return (hit == self) ? nil : hit;
 }
 @end
-
-#pragma mark - 顶层窗口
 
 @interface SBWindow : UIWindow
 @end
@@ -46,43 +48,101 @@
 #pragma mark - 状态
 
 static SBWindow *g_window = nil;
-static UIView *g_ball = nil;
-static UIView *g_panel = nil;
+static UIView   *g_host = nil;
+static UIView   *g_ball = nil;
+static UIView   *g_panel = nil;
 static UITextView *g_text = nil;
-static NSTimer *g_refresh = nil;
-static CGPoint g_ballRest = {0, 0};
-static BOOL g_panelOpen = NO;
-
-// present 触发时抓到的真实 window，作为 rc_keyWindow 的兜底来源
+static NSTimer  *g_refresh = nil;
+static NSTimer  *g_heal = nil;
+static BOOL      g_panelOpen = NO;
 static UIWindow *g_lastWindow = nil;
+static int       g_attempts = 0;
+static id        g_actions = nil;
 
-#pragma mark - 工具
+#pragma mark - 窗口探测
 
-static CGRect rc_screenBounds(void) {
-    UIScreen *s = [UIScreen mainScreen];
-    return s ? [s bounds] : CGRectMake(0, 0, 375, 812);
-}
-
-static UIWindowScene *rc_activeScene(void) {
+static UIWindow *rc_keyWindow(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return nil;
 
-    // 优先用 present 时机抓到的那个 window 的 scene
-    if (g_lastWindow) {
-        UIWindowScene *ws = [g_lastWindow windowScene];
-        if (ws) return ws;
+    UIWindow *kw = [app keyWindow];
+    if (kw) return kw;
+
+    if (g_lastWindow) return g_lastWindow;
+
+    NSArray *allWins = [app windows];
+    if (allWins) {
+        for (id w in allWins) {
+            if (![w isKindOfClass:[UIWindow class]]) continue;
+            if ([(UIWindow *)w isKeyWindow]) return (UIWindow *)w;
+        }
+        for (id w in allWins) {
+            if ([w isKindOfClass:[UIWindow class]]) return (UIWindow *)w;
+        }
     }
 
     NSArray *scenes = [app connectedScenes];
-    if (!scenes || scenes.count == 0) return nil;
-    for (id s in scenes) {
-        if ([s isKindOfClass:[UIWindowScene class]]) return (UIWindowScene *)s;
+    if (!scenes) return nil;
+    for (id sc in scenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        NSArray *wins = [(UIWindowScene *)sc windows];
+        if (!wins) continue;
+        for (id w in wins) {
+            if (![w isKindOfClass:[UIWindow class]]) continue;
+            if ([(UIWindow *)w isKeyWindow]) return (UIWindow *)w;
+        }
+        for (id w in wins) {
+            if ([w isKindOfClass:[UIWindow class]]) return (UIWindow *)w;
+        }
     }
     return nil;
 }
 
-static UIView *rc_makeButton(NSString *title, SEL action, id target,
-                             UIColor *bg, CGRect frame) {
+// 取一个可用的 UIWindowScene，多种来源依次尝试
+static UIWindowScene *rc_findScene(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (!app) return nil;
+
+    if (g_lastWindow) {
+        UIWindowScene *s = [g_lastWindow windowScene];
+        if (s) return s;
+    }
+
+    UIWindow *kw = rc_keyWindow();
+    if (kw) {
+        UIWindowScene *s = [kw windowScene];
+        if (s) return s;
+    }
+
+    NSArray *scenes = [app connectedScenes];
+    if (scenes) {
+        for (id sc in scenes) {
+            if ([sc isKindOfClass:[UIWindowScene class]]) return (UIWindowScene *)sc;
+        }
+    }
+    return nil;
+}
+
+// 尺寸：优先 window bounds，其次 scene coordinateSpace，最后 UIScreen
+static CGRect rc_hostBounds(UIWindow *w, UIWindowScene *sc) {
+    if (w) {
+        CGRect b = [w bounds];
+        if (b.size.width > 1 && b.size.height > 1) return b;
+    }
+    if (sc) {
+        UICoordinateSpace *cs = [sc coordinateSpace];
+        if (cs) {
+            CGRect b = [cs bounds];
+            if (b.size.width > 1 && b.size.height > 1) return b;
+        }
+    }
+    return [UIScreen mainScreen].bounds;
+}
+
+#pragma mark - 按钮工厂
+
+static UIView *rc_button(NSString *title, SEL action, id target,
+                         UIColor *bg, CGRect frame) {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     [b setFrame:frame];
     [b setTitle:title forState:UIControlStateNormal];
@@ -94,83 +154,38 @@ static UIView *rc_makeButton(NSString *title, SEL action, id target,
     return b;
 }
 
-// 取 key window：iOS 13+ 的 UIApplication.keyWindow 在 scene 架构下可能返回 nil，
-// 必须回落到 scene 的 windows 里找 isKeyWindow
-static UIWindow *rc_keyWindow(void) {
-    UIApplication *app = [UIApplication sharedApplication];
-    if (!app) return nil;
-
-    UIWindow *kw = [app keyWindow];
-    if (kw) return kw;
-
-    if (g_lastWindow) return g_lastWindow;
-
-    // 老 API，scene 架构下仍可能返回可用的窗口列表
-    NSArray *allWins = [app windows];
-    if (allWins) {
-        for (id w in allWins) {
-            if ([w isKindOfClass:[UIWindow class]] &&
-                [(UIWindow *)w isKeyWindow]) return (UIWindow *)w;
-        }
-        for (id w in allWins) {
-            if ([w isKindOfClass:[UIWindow class]]) return (UIWindow *)w;
-        }
-    }
-
-    NSArray *scenes = [app connectedScenes];
-    if (scenes) {
-        for (id sc in scenes) {
-            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-            NSArray *wins = [(UIWindowScene *)sc windows];
-            if (!wins) continue;
-            for (id w in wins) {
-                if (![w isKindOfClass:[UIWindow class]]) continue;
-                UIWindow *win = (UIWindow *)w;
-                if ([win isKeyWindow]) return win;
-            }
-            // 没有 key 就退回第一个
-            for (id w in wins) {
-                if ([w isKindOfClass:[UIWindow class]]) return (UIWindow *)w;
-            }
-        }
-    }
-    return nil;
+static UIView *rc_label(NSString *text, CGFloat x, CGFloat y, CGFloat w, CGFloat h,
+                        UIFont *font, UIColor *color) {
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(x, y, w, h)];
+    [l setText:text];
+    [l setFont:font];
+    [l setTextColor:color];
+    return l;
 }
 
-#pragma mark - 顶层 VC
+#pragma mark - 面板动作
 
-// 从 app 的 key window 找最上层 VC，用于弹出分享面板
-static UIViewController *rc_topViewController(void) {
-    UIWindow *kw = rc_keyWindow();
-    UIViewController *vc = kw ? [kw rootViewController] : nil;
-    if (!vc) vc = [g_window rootViewController];
-    return vc;
-}
-
-#pragma mark - 面板
-
-@interface SBUIActions : NSObject
-- (void)doRefresh;
+@interface RCActions : NSObject
+- (void)refresh;
 - (void)doCopy;
 - (void)doShare;
 - (void)doClear;
 - (void)doClose;
 @end
 
-@implementation SBUIActions
+@implementation RCActions
 
-- (void)doRefresh {
-    if (!g_text) return;
+- (void)refresh {
+    if (!g_text || !g_panelOpen) return;
     NSString *snap = RCMemLogSnapshot();
     if (!snap) return;
     if ([snap isEqualToString:[g_text text]]) return;
     [g_text setText:snap];
-    // 滚到底部，日志是追加式，最新一行在末尾
+
     CGSize cs = [g_text contentSize];
-    CGFloat h = cs.height;
     CGRect b = [g_text bounds];
-    if (h > b.size.height) {
-        [g_text setContentOffset:CGPointMake(0, h - b.size.height)];
+    if (cs.height > b.size.height) {
+        [g_text setContentOffset:CGPointMake(0, cs.height - b.size.height)];
     }
 }
 
@@ -187,21 +202,41 @@ static UIViewController *rc_topViewController(void) {
     NSString *snap = RCMemLogSnapshot();
     if (!snap || snap.length == 0) return;
 
-    // 同时写一份到 Documents，方便文件 App 取
     NSString *path = [NSTemporaryDirectory()
                       stringByAppendingPathComponent:
                       [NSString stringWithUTF8String:RC_CFG_LOG_NAME]];
     [snap writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 
-    UIViewController *vc = rc_topViewController();
+    UIWindow *kw = rc_keyWindow();
+    UIViewController *vc = kw ? [kw rootViewController] : nil;
+    if (!vc && g_window) vc = [g_window rootViewController];
     if (!vc) return;
 
     NSURL *url = [NSURL fileURLWithPath:path];
     NSArray *items = url ? @[url] : @[snap];
+    // 顶层 VC：避免在已 present 的 VC 上再次 present 失败
+    UIViewController *top = vc;
+    while ([top presentedViewController]) {
+        top = [top presentedViewController];
+    }
+
     UIActivityViewController *av =
         [[UIActivityViewController alloc] initWithActivityItems:items
                                           applicationActivities:nil];
-    [vc presentViewController:av animated:YES completion:nil];
+
+    // iPad 必需：不设 popover 锚点会直接抛异常崩溃
+    UIPopoverPresentationController *pop = [av popoverPresentationController];
+    if (pop) {
+        CGRect anchor = CGRectMake(0, 0, 1, 1);
+        if (g_panel) {
+            CGRect pb = [g_panel bounds];
+            anchor = CGRectMake(pb.size.width / 2, pb.size.height / 2, 1, 1);
+        }
+        [pop setSourceView:g_panel ? g_panel : [top view]];
+        [pop setSourceRect:anchor];
+    }
+
+    [top presentViewController:av animated:YES completion:nil];
 }
 
 - (void)doClear {
@@ -211,370 +246,353 @@ static UIViewController *rc_topViewController(void) {
 }
 
 - (void)doClose {
-    [SBUIActions closePanel];
+    [RCActions closePanel];
+}
+
+// 自愈节拍：球脱离视图树或 window 被隐藏时恢复
+- (void)healTick {
+    if (!g_ball) return;
+    UIView *sp = [g_ball superview];
+    if (!sp) {
+        RC(@"[UI] 自愈：球脱离视图树，重新挂载");
+        if (g_host) [g_host addSubview:g_ball];
+        return;
+    }
+    if (g_window && [g_window isHidden]) {
+        RC(@"[UI] 自愈：window 被隐藏，重新显示");
+        [g_window setHidden:NO];
+    }
 }
 
 + (void)closePanel {
-    if (!g_panel) return;
+    if (!g_panel || !g_panelOpen) return;
     g_panelOpen = NO;
-
-    CGRect target = g_panel.bounds;
-    // 收回到球位置：缩到 0.01 并淡出
-    [UIView animateWithDuration:0.18
+    [UIView animateWithDuration:0.16
                           delay:0
-         usingSpringWithDamping:1.0
-          initialSpringVelocity:0
                         options:UIViewAnimationOptionCurveEaseInOut
                      animations:^{
         [g_panel setAlpha:0];
     } completion:^(BOOL done) {
         [g_panel setHidden:YES];
-        [g_panel setBounds:target];
     }];
 }
 
-@end
++ (void)openPanel {
+    if (!g_panel || g_panelOpen) return;
 
-#pragma mark - 悬浮球交互
+    CGRect pb = [g_panel bounds];
+    CGRect hb = g_host ? [g_host bounds] : [UIScreen mainScreen].bounds;
 
-@interface SBBallCtrl : NSObject
-- (void)onTap:(id)g;
-- (void)onPan:(UIPanGestureRecognizer *)g;
-@end
-
-@implementation SBBallCtrl
-
-- (void)onTap:(id)g {
-    if (g_panelOpen) {
-        [SBUIActions closePanel];
-        return;
-    }
-    if (!g_panel) return;
-
-    CGRect sb = rc_screenBounds();
-    CGFloat pw = g_panel.bounds.size.width;
-    CGFloat ph = g_panel.bounds.size.height;
-
-    // 从球位置向屏幕内侧展开
-    CGPoint c = [g_ball center];
-    CGFloat cx = (c.x > sb.size.width / 2) ? (sb.size.width - pw / 2 - 16)
-                                           : (pw / 2 + 16);
-    CGFloat cy = sb.size.height / 2;
-    if (cy + ph / 2 > sb.size.height - 40) cy = sb.size.height - ph / 2 - 40;
-    if (cy - ph / 2 < 60) cy = ph / 2 + 60;
+    // 从球所在的一侧展开，避免被球挡住
+    CGPoint bc = g_ball ? [g_ball center] : CGPointMake(hb.size.width - 40, 200);
+    CGFloat cx = (bc.x > hb.size.width / 2)
+                 ? (hb.size.width - pb.size.width / 2 - 16)
+                 : (pb.size.width / 2 + 16);
+    CGFloat cy = hb.size.height / 2;
+    if (cy + pb.size.height / 2 > hb.size.height - 30)
+        cy = hb.size.height - pb.size.height / 2 - 30;
+    if (cy - pb.size.height / 2 < 40)
+        cy = pb.size.height / 2 + 40;
 
     [g_panel setCenter:CGPointMake(cx, cy)];
     [g_panel setAlpha:0];
     [g_panel setHidden:NO];
     g_panelOpen = YES;
 
-    [UIView animateWithDuration:0.45
+    [UIView animateWithDuration:0.42
                           delay:0
-         usingSpringWithDamping:0.78
-          initialSpringVelocity:0.6
+         usingSpringWithDamping:0.80
+          initialSpringVelocity:0.5
                         options:UIViewAnimationOptionCurveEaseInOut
                      animations:^{
         [g_panel setAlpha:1];
     } completion:nil];
+
+    if (g_text) [g_text setText:RCMemLogSnapshot()];
+
+    // 球必须在面板之上，否则面板会挡住球，点不到就收不起来
+    if (g_host && g_ball) [g_host bringSubviewToFront:g_ball];
+}
+
+@end
+
+#pragma mark - 悬浮球：单手势同时处理点击与拖动
+
+@interface RCBallCtrl : NSObject
+- (void)onTap:(id)g;
+- (void)onPan:(UIPanGestureRecognizer *)g;
+@end
+
+@implementation RCBallCtrl
+
+// 轻点：切换面板
+- (void)onTap:(id)g {
+    if (g_panelOpen) [RCActions closePanel];
+    else [RCActions openPanel];
 }
 
 - (void)onPan:(UIPanGestureRecognizer *)g {
-    CGPoint t = [g translationInView:g_window];
+    if (!g_ball) return;
+
+    CGPoint t = [g translationInView:g_host];
+    [g setTranslation:CGPointZero inView:g_host];
+
     CGPoint c = [g_ball center];
     CGPoint nc = CGPointMake(c.x + t.x, c.y + t.y);
 
-    CGRect sb = rc_screenBounds();
-    CGFloat half = 28;
-    if (nc.x < half) nc.x = half;
-    if (nc.x > sb.size.width - half) nc.x = sb.size.width - half;
-    if (nc.y < half + 40) nc.y = half + 40;
-    if (nc.y > sb.size.height - half - 20) nc.y = sb.size.height - half - 20;
+    CGRect hb = g_host ? [g_host bounds] : [UIScreen mainScreen].bounds;
+    CGFloat half = RC_BALL_SIZE / 2;
+
+    if (nc.x < half + 4) nc.x = half + 4;
+    if (nc.x > hb.size.width - half - 4) nc.x = hb.size.width - half - 4;
+    if (nc.y < half + 30) nc.y = half + 30;
+    if (nc.y > hb.size.height - half - 20) nc.y = hb.size.height - half - 20;
 
     // 跟手：直接设 center，不做插值
     [g_ball setCenter:nc];
-    [g setTranslation:CGPointZero inView:g_window];
 
-    if ([g state] == UIGestureRecognizerStateEnded ||
-        [g state] == UIGestureRecognizerStateCancelled) {
-        // 吸附最近边缘
-        CGFloat targetX = (nc.x < sb.size.width / 2) ? (half + 8)
-                                                     : (sb.size.width - half - 8);
-        [UIView animateWithDuration:0.5
+    long state = (long)[g state];
+
+    if (state == UIGestureRecognizerStateEnded ||
+        state == UIGestureRecognizerStateCancelled) {
+        // 拖动结束：吸附最近边缘
+        CGFloat targetX = (nc.x < hb.size.width / 2)
+                          ? (half + 12) : (hb.size.width - half - 12);
+        [UIView animateWithDuration:0.48
                               delay:0
              usingSpringWithDamping:0.72
-              initialSpringVelocity:0.8
+              initialSpringVelocity:0.7
                             options:UIViewAnimationOptionCurveEaseInOut |
                                     UIViewAnimationOptionBeginFromCurrentState
                          animations:^{
             [g_ball setCenter:CGPointMake(targetX, nc.y)];
         } completion:nil];
-        g_ballRest = CGPointMake(targetX, nc.y);
     }
 }
 
 @end
 
-static SBBallCtrl *g_ctrl = nil;
+static RCBallCtrl *g_ctrl = nil;
 
 #pragma mark - 构建
 
 static BOOL rc_buildUI(void) {
-    CGRect sb = rc_screenBounds();
-    UIApplication *app = [UIApplication sharedApplication];
+    // ── 1. 选宿主 ──
+    UIWindowScene *scene = rc_findScene();
+    UIWindow *appWin = rc_keyWindow();
 
-    // ── 选宿主窗口 ──
-    // 优先自建高层 window（能压过 app 自己的浮窗），失败则退化为挂到 app 的 keyWindow
-    UIWindowScene *scene = rc_activeScene();
-    if (!scene && app) {
-        UIWindow *kw = rc_keyWindow();
-        if (kw) scene = [kw windowScene];
-    }
+    RC(@"[UI] 探测 scene=%@ appWin=%@",
+       scene ? @"有" : @"无", appWin ? @"有" : @"无");
 
-    RC(@"[UI] scene=%@ keyWindow=%@",
-       scene ? NSStringFromClass([scene class]) : @"(nil)",
-       rc_keyWindow() ? @"有" : @"无");
+    UIWindow *prevKey = appWin;
+    CGRect hb = CGRectMake(0, 0, 0, 0);
 
-    UIWindow *hostWin = nil;
-
+    // 方案 A：自建高层 window（能压过 alert 与 app 浮窗）
     if (scene) {
         g_window = [[SBWindow alloc] initWithWindowScene:scene];
-        hostWin = g_window;
-        RC(@"[UI] 用 initWithWindowScene 创建");
-    } else {
-        g_window = [[SBWindow alloc] initWithFrame:sb];
-        hostWin = g_window;
-        RC(@"[UI] 用 initWithFrame 创建（无 scene）");
+        if (g_window) {
+            hb = rc_hostBounds(g_window, scene);
+            if (hb.size.width < 1) hb = rc_hostBounds(appWin, scene);
+            [g_window setFrame:hb];
+            [g_window setWindowLevel:RC_WINDOW_LEVEL];
+            [g_window setBackgroundColor:[UIColor clearColor]];
+
+            UIViewController *vc = [[UIViewController alloc] init];
+            SBPassthroughView *v =
+                [[SBPassthroughView alloc] initWithFrame:
+                    CGRectMake(0, 0, hb.size.width, hb.size.height)];
+            [v setBackgroundColor:[UIColor clearColor]];
+            [vc setView:v];
+            [g_window setRootViewController:vc];
+            g_host = v;
+
+            [g_window makeKeyAndVisible];
+            [g_window setHidden:NO];
+            if (prevKey && prevKey != g_window && [prevKey canBecomeKeyWindow]) {
+                [prevKey makeKeyWindow];
+            }
+            RC(@"[UI] 方案A 自建 window 成功 level=%.0f size=%.0fx%.0f",
+               (double)RC_WINDOW_LEVEL,
+               (double)hb.size.width, (double)hb.size.height);
+        }
     }
 
-    if (!g_window) {
-        RC(@"!! window 创建失败");
+    // 方案 B：挂到 app 的 keyWindow（保底可见）
+    if (!g_host) {
+        UIWindow *kw = appWin;
+        if (kw) {
+            UIViewController *rvc = [kw rootViewController];
+            UIView *base = rvc ? [rvc view] : kw;
+            if (base) {
+                hb = [base bounds];
+                if (hb.size.width < 1) hb = [kw bounds];
+                SBPassthroughView *v =
+                    [[SBPassthroughView alloc] initWithFrame:
+                        CGRectMake(0, 0, hb.size.width, hb.size.height)];
+                [v setBackgroundColor:[UIColor clearColor]];
+                [base addSubview:v];
+                [base bringSubviewToFront:v];
+                g_host = v;
+                RC(@"[UI] 方案B 挂到 keyWindow 成功 size=%.0fx%.0f",
+                   (double)hb.size.width, (double)hb.size.height);
+            }
+        }
+    }
+
+    if (!g_host) {
+        RC(@"!! 无可用宿主窗口");
         return NO;
     }
 
-    if (!scene) {
-        // 无 scene 时自建 window 在 iOS 13+ 往往不显示，直接退化为挂在 keyWindow
-        RC(@"[UI] 无 scene，改用 keyWindow 作为宿主");
-        g_window = nil;
-        hostWin = rc_keyWindow();
-        if (!hostWin) {
-            RC(@"!! keyWindow 也为空");
-            return NO;
-        }
+    if (hb.size.width < 100 || hb.size.height < 100) {
+        hb = [UIScreen mainScreen].bounds;
     }
-
-    UIView *hostView = nil;
-    CGRect hostBounds = sb;
-
-    if (g_window) {
-        [g_window setFrame:sb];
-        [g_window setWindowLevel:RC_WINDOW_LEVEL];
-        [g_window setBackgroundColor:[UIColor clearColor]];
-
-        UIViewController *vc = [[UIViewController alloc] init];
-        SBPassthroughView *v = [[SBPassthroughView alloc] initWithFrame:sb];
-        [v setBackgroundColor:[UIColor clearColor]];
-        [vc setView:v];
-        [g_window setRootViewController:vc];
-        hostView = v;
-
-        // 关键：先 makeKeyAndVisible 保证显示，再把 key 还给原窗口，避免抢焦点
-        UIWindow *prevKey = rc_keyWindow();
-        [g_window makeKeyAndVisible];
-        if (prevKey && prevKey != g_window && [prevKey canBecomeKeyWindow]) {
-            [prevKey makeKeyWindow];
-            RC(@"[UI] key 已归还给原窗口");
-        }
-        // 再确认一次可见
-        [g_window setHidden:NO];
-        RC(@"[UI] 自建 window level=%.0f hidden=%d",
-           (double)RC_WINDOW_LEVEL, (int)[g_window isHidden]);
-    } else {
-        // 挂在 app 的 keyWindow 上
-        UIViewController *rvc = [hostWin rootViewController];
-        UIView *base = rvc ? [rvc view] : hostWin;
-        if (!base) {
-            RC(@"!! keyWindow 无可用 view");
-            return NO;
-        }
-        hostBounds = [base bounds];
-        SBPassthroughView *v = [[SBPassthroughView alloc] initWithFrame:hostBounds];
-        [v setBackgroundColor:[UIColor clearColor]];
-        [base addSubview:v];
-        [base bringSubviewToFront:v];
-        hostView = v;
-        RC(@"[UI] 已挂到 keyWindow，host=%.0fx%.0f",
-           (double)hostBounds.size.width, (double)hostBounds.size.height);
-    }
-
-    if (!hostView) {
-        RC(@"!! 宿主 view 为空");
+    if (hb.size.width < 100 || hb.size.height < 100) {
+        RC(@"!! 宿主尺寸异常 %.0fx%.0f",
+           (double)hb.size.width, (double)hb.size.height);
         return NO;
     }
 
-    sb = hostBounds;
-    g_ctrl = [[SBBallCtrl alloc] init];
+    // ── 2. 悬浮球 ──
+    if (!g_ctrl) g_ctrl = [[RCBallCtrl alloc] init];
 
-    // ── 悬浮球 ──
-    CGFloat bs = 56;
-    CGFloat bx = sb.size.width - bs - 12;
-    CGFloat by = sb.size.height * 0.28;
-    g_ballRest = CGPointMake(bx + bs / 2, by + bs / 2);
+    CGFloat half = RC_BALL_SIZE / 2;
+    CGFloat bx = hb.size.width - RC_BALL_SIZE - 12;
+    CGFloat by = hb.size.height * 0.28;
+    if (bx < 4) bx = 4;
+    if (by < RC_BALL_SIZE + 24) by = RC_BALL_SIZE + 24;
+    if (by > hb.size.height - RC_BALL_SIZE - 20)
+        by = hb.size.height - RC_BALL_SIZE - 20;
+    if (by < 4) by = 4;
 
-    g_ball = [[UIView alloc] initWithFrame:CGRectMake(bx, by, bs, bs)];
-    [g_ball setCenter:g_ballRest];
-    [g_ball setBackgroundColor:[UIColor colorWithRed:0.11 green:0.12 blue:0.15 alpha:0.92]];
-    [[g_ball layer] setCornerRadius:bs / 2];
+    g_ball = [[UIView alloc] initWithFrame:
+              CGRectMake(bx, by, RC_BALL_SIZE, RC_BALL_SIZE)];
+    [g_ball setBackgroundColor:
+        [UIColor colorWithRed:0.10 green:0.11 blue:0.14 alpha:0.94]];
+    [[g_ball layer] setCornerRadius:half];
     [[g_ball layer] setMasksToBounds:NO];
+    [[g_ball layer] setBorderWidth:2.0];
+    [[g_ball layer] setBorderColor:
+        [[UIColor colorWithRed:0.32 green:0.78 blue:0.98 alpha:1] CGColor]];
     [[g_ball layer] setShadowColor:[[UIColor blackColor] CGColor]];
-    [[g_ball layer] setShadowOpacity:0.35];
-    [[g_ball layer] setShadowRadius:8];
-    [[g_ball layer] setShadowOffset:CGSizeMake(0, 3)];
-    [[g_ball layer] setBorderWidth:1.5];
-    [[g_ball layer] setBorderColor:[[UIColor colorWithRed:0.35 green:0.78 blue:0.98 alpha:0.9] CGColor]];
+    [[g_ball layer] setShadowOpacity:0.4];
+    [[g_ball layer] setShadowRadius:6];
+    [[g_ball layer] setShadowOffset:CGSizeMake(0, 2)];
 
-    UILabel *glyph = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, bs, bs)];
-    [glyph setText:@"R"];
+    UILabel *glyph = [[UILabel alloc] initWithFrame:
+                      CGRectMake(0, 0, RC_BALL_SIZE, RC_BALL_SIZE)];
+    [glyph setText:[NSString stringWithFormat:@"R%s", RC_CFG_UI_TAG]];
     [glyph setTextAlignment:NSTextAlignmentCenter];
-    [glyph setFont:[UIFont boldSystemFontOfSize:24]];
-    [glyph setTextColor:[UIColor colorWithRed:0.35 green:0.78 blue:0.98 alpha:1]];
+    [glyph setFont:[UIFont boldSystemFontOfSize:13]];
+    [glyph setTextColor:[UIColor colorWithRed:0.32 green:0.78 blue:0.98 alpha:1]];
     [g_ball addSubview:glyph];
 
+    // 只用一个 pan 手势：轻点=切换面板，拖动=移动球
     UITapGestureRecognizer *tap =
-        [[UITapGestureRecognizer alloc] initWithTarget:g_ctrl action:@selector(onTap:)];
+        [[UITapGestureRecognizer alloc] initWithTarget:g_ctrl
+                                                action:@selector(onTap:)];
+    [tap setCancelsTouchesInView:NO];
     [g_ball addGestureRecognizer:tap];
 
     UIPanGestureRecognizer *pan =
-        [[UIPanGestureRecognizer alloc] initWithTarget:g_ctrl action:@selector(onPan:)];
+        [[UIPanGestureRecognizer alloc] initWithTarget:g_ctrl
+                                                action:@selector(onPan:)];
     [pan setCancelsTouchesInView:NO];
     [g_ball addGestureRecognizer:pan];
 
-    [hostView addSubview:g_ball];
+    // 拖动时不要误触发点击
+    [tap requireGestureRecognizerToFail:pan];
+    RC(@"[UI] 手势就位：tap=切换面板 pan=拖动");
 
-    // ── 面板 ──
-    CGFloat pw = sb.size.width - 32;
+    [g_host addSubview:g_ball];
+
+    // ── 3. 日志面板 ──
+    CGFloat pw = hb.size.width - 40;
     if (pw > 560) pw = 560;
-    CGFloat ph = sb.size.height * 0.62;
+    if (pw < 240) pw = 240;
+    CGFloat ph = hb.size.height * 0.66;
     if (ph > 520) ph = 520;
+    if (ph < 260) ph = 260;
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, pw, ph)];
-    [panel setCenter:CGPointMake(sb.size.width / 2, sb.size.height / 2)];
-    [panel setBackgroundColor:[UIColor colorWithRed:0.08 green:0.09 blue:0.12 alpha:0.97]];
+    [panel setCenter:CGPointMake(hb.size.width / 2, hb.size.height / 2)];
+    [panel setBackgroundColor:
+        [UIColor colorWithRed:0.07 green:0.08 blue:0.11 alpha:0.98]];
     [[panel layer] setCornerRadius:16];
     [[panel layer] setMasksToBounds:YES];
     [panel setHidden:YES];
     [panel setAlpha:0];
 
-    // 标题
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 6, pw - 32, 22)];
-    [title setText:@"StarRecon 日志"];
-    [title setFont:[UIFont boldSystemFontOfSize:16]];
-    [title setTextColor:[UIColor whiteColor]];
-    [panel addSubview:title];
+    RCActions *act = [[RCActions alloc] init];
 
-    SBUIActions *act = [[SBUIActions alloc] init];
+    // 标题栏
+    [panel addSubview:rc_label(@"StarRecon 日志",
+                               16, 8, pw - 120, 22,
+                               [UIFont boldSystemFontOfSize:16],
+                               [UIColor whiteColor])];
+    [panel addSubview:rc_label(@"点悬浮球可收起",
+                               pw - 130, 10, 114, 18,
+                               [UIFont systemFontOfSize:11],
+                               [UIColor lightGrayColor])];
 
     // 按钮行
-    CGFloat bw = (pw - 44) / 4.0;
-    CGFloat by2 = 32;
-    [panel addSubview:rc_makeButton(@"复制", @selector(doCopy), act,
-        [UIColor colorWithRed:0.18 green:0.42 blue:0.70 alpha:1],
-        CGRectMake(12 + (bw + 6) * 0, by2, bw, 26))];
-    [panel addSubview:rc_makeButton(@"分享", @selector(doShare), act,
-        [UIColor colorWithRed:0.16 green:0.52 blue:0.34 alpha:1],
-        CGRectMake(12 + (bw + 6) * 1, by2, bw, 26))];
-    [panel addSubview:rc_makeButton(@"清空", @selector(doClear), act,
-        [UIColor colorWithRed:0.45 green:0.32 blue:0.12 alpha:1],
-        CGRectMake(12 + (bw + 6) * 2, by2, bw, 26))];
-    [panel addSubview:rc_makeButton(@"关闭", @selector(doClose), act,
-        [UIColor colorWithRed:0.52 green:0.18 blue:0.20 alpha:1],
-        CGRectMake(12 + (bw + 6) * 3, by2, bw, 26))];
+    CGFloat gap = 6;
+    CGFloat bw = (pw - 24 - gap * 3) / 4.0;
+    CGFloat by2 = 36;
+    [panel addSubview:rc_button(@"复制", @selector(doCopy), act,
+        [UIColor colorWithRed:0.16 green:0.40 blue:0.68 alpha:1],
+        CGRectMake(12, by2, bw, 28))];
+    [panel addSubview:rc_button(@"分享", @selector(doShare), act,
+        [UIColor colorWithRed:0.14 green:0.48 blue:0.32 alpha:1],
+        CGRectMake(12 + (bw + gap), by2, bw, 28))];
+    [panel addSubview:rc_button(@"清空", @selector(doClear), act,
+        [UIColor colorWithRed:0.44 green:0.31 blue:0.10 alpha:1],
+        CGRectMake(12 + (bw + gap) * 2, by2, bw, 28))];
+    [panel addSubview:rc_button(@"关闭", @selector(doClose), act,
+        [UIColor colorWithRed:0.50 green:0.17 blue:0.18 alpha:1],
+        CGRectMake(12 + (bw + gap) * 3, by2, bw, 28))];
 
-    // 文本区
-    g_text = [[UITextView alloc] initWithFrame:CGRectMake(12, 66, pw - 24, ph - 78)];
+    // 日志文本
+    g_text = [[UITextView alloc] initWithFrame:
+              CGRectMake(12, 72, pw - 24, ph - 84)];
     [g_text setEditable:NO];
     [g_text setSelectable:YES];
-    [g_text setBackgroundColor:[UIColor colorWithRed:0.04 green:0.05 blue:0.07 alpha:1]];
-    [g_text setTextColor:[UIColor colorWithRed:0.72 green:0.85 blue:0.72 alpha:1]];
+    [g_text setBackgroundColor:
+        [UIColor colorWithRed:0.03 green:0.04 blue:0.06 alpha:1]];
+    [g_text setTextColor:
+        [UIColor colorWithRed:0.70 green:0.84 blue:0.70 alpha:1]];
     [g_text setFont:[UIFont monospacedSystemFontOfSize:10 weight:0]];
     [[g_text layer] setCornerRadius:8];
     [[g_text layer] setMasksToBounds:YES];
     [panel addSubview:g_text];
 
-    [hostView addSubview:panel];
+    [g_host addSubview:panel];
     g_panel = panel;
 
-    // 只显示，不抢 key window —— makeKeyAndVisible 会夺走 app 的键盘与输入焦点
-    RC(@"[UI] 悬浮球已创建 屏幕=%.0fx%.0f 位置=(%.0f,%.0f)",
-       (double)sb.size.width, (double)sb.size.height,
-       (double)g_ballRest.x, (double)g_ballRest.y);
+    // 球永远在面板之上
+    [g_host bringSubviewToFront:g_ball];
+
+    RC(@"[UI] 悬浮球就位 宿主=%.0fx%.0f 球=(%.0f,%.0f) 版本=%s",
+       (double)hb.size.width, (double)hb.size.height,
+       (double)bx + half, (double)by + half, RC_UI_VERSION);
     return YES;
 }
 
-#pragma mark - 前置声明
-
-void RCInstallUIWindow(void);
-
-#pragma mark - present 时机接管
-
-// app 弹出卡密验证 alert 时，必定已经有可用的 window。
-// 用这个时机抓 window 并补建 UI，比轮询可靠。
-static void rc_presentVC(id self, SEL _cmd, UIViewController *vc,
-                         BOOL animated, void (^completion)(void)) {
-    typedef void (*PFN)(id, SEL, UIViewController *, BOOL, void (^)(void));
-    static PFN orig = NULL;
-    static int done = 0;
-    if (!done) {
-        orig = (PFN)RCOrigIMP(@"UIViewController",
-                    @"presentViewController:animated:completion:");
-        done = 1;
-    }
-
-    if (orig) orig(self, _cmd, vc, animated, completion);
-
-    RC_SAFE_BEGIN
-        UIView *v = [self view];
-        UIWindow *w = v ? [v window] : nil;
-        if (w) {
-            g_lastWindow = w;
-            RC(@"[UI] present 抓到 window=%@", NSStringFromClass([w class]));
-            if (!g_ball) {
-                RC(@"[UI] 此时补建 UI");
-                RCAfterSec(0.4, ^{ RCInstallUIWindow(); });
-            }
-        } else {
-            RC(@"[UI] present 但拿不到 window");
-        }
-    RC_SAFE_END
-}
+#pragma mark - 自愈
 
 #pragma mark - 安装
 
-static int g_uiAttempts = 0;
-
 void RCInstallUIWindow(void) {
-    if (g_window || g_ball) {
-        RC(@"UI 已存在，跳过");
+    if (g_ball) return;
+
+    if (g_attempts >= 60) {
+        RC(@"!! UI 创建 60 次仍失败");
         return;
     }
-    if (g_uiAttempts >= 30) {
-        RC(@"!! UI 重试 30 次仍失败");
-        // 兜底提示：让用户知道 dylib 已经加载，只是 UI 起不来
-        UIApplication *app = [UIApplication sharedApplication];
-        UIWindow *kw = app ? [app keyWindow] : nil;
-        UIViewController *vc = kw ? [kw rootViewController] : nil;
-        if (vc) {
-            UIAlertController *al = [UIAlertController
-                alertControllerWithTitle:@"ReconDylib 已加载"
-                                 message:@"悬浮球创建失败，日志仍在写入文件。请把设备和系统版本告诉我。"
-                          preferredStyle:0];
-            [vc presentViewController:al animated:YES completion:nil];
-        }
-        return;
-    }
-    g_uiAttempts++;
+    g_attempts++;
 
     RCSection(@"应用内 UI");
-    RC(@"第 %d 次尝试创建", g_uiAttempts);
+    RC(@"[UI] 第 %d 次尝试 版本=%s", g_attempts, RC_UI_VERSION);
 
     BOOL ok = NO;
     RC_SAFE_BEGIN
@@ -582,43 +600,78 @@ void RCInstallUIWindow(void) {
     RC_SAFE_END
 
     if (!ok) {
-        RC(@"创建失败，1s 后重试");
-        RCAfterSec(1.0, ^{
+        // 清掉半成品，否则下次进来会被"已存在"判断挡住
+        if (g_ball) { [g_ball removeFromSuperview]; g_ball = nil; }
+        if (g_panel) { [g_panel removeFromSuperview]; g_panel = nil; }
+        if (g_host) { [g_host removeFromSuperview]; g_host = nil; }
+        if (g_window) { [g_window setHidden:YES]; g_window = nil; }
+        g_text = nil;
+        g_panelOpen = NO;
+
+        RC(@"[UI] 失败，1.5s 后重试");
+        RCAfterSec(1.5, ^{
             RCInstallUIWindow();
         });
         return;
     }
 
-    // 挂 present hook（只挂一次）
-    static int presentHooked = 0;
-    if (!presentHooked) {
-        presentHooked = 1;
-        RCHookInstance(NSClassFromString(@"UIViewController"),
-                       @selector(presentViewController:animated:completion:),
-                       (IMP)rc_presentVC);
-    }
+    if (!g_actions) g_actions = [[RCActions alloc] init];
 
+    // 刷新定时器
     if (g_refresh) [g_refresh invalidate];
     g_refresh = [NSTimer scheduledTimerWithTimeInterval:0.6
-                                                 target:g_ctrl
-                                               selector:@selector(doRefresh)
+                                                 target:g_actions
+                                               selector:@selector(refresh)
                                                userInfo:nil
                                                 repeats:YES];
-    RC(@"悬浮球就位：点开看日志，拖动可换位置");
 
-    // 2 秒后自检：球是否真的在视图树上
-    RCAfterSec(2.0, ^{
-        if (!g_ball) {
-            RC(@"!! 自检：球对象为空");
-            return;
-        }
-        UIView *sp = [g_ball superview];
-        RC(@"自检：ball.superview=%@ hidden=%d alpha=%.1f center=(%.0f,%.0f)",
-           sp ? NSStringFromClass([sp class]) : @"(nil)",
-           (int)[g_ball isHidden],
-           (double)[g_ball alpha],
-           (double)[g_ball center].x,
-           (double)[g_ball center].y);
-        if (!sp) RC(@"!! 自检：球已脱离视图树，UI 不会显示");
+    // 自愈定时器
+    if (!g_heal) {
+        g_heal = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                  target:g_actions
+                                                selector:@selector(healTick)
+                                                userInfo:nil
+                                                 repeats:YES];
+    }
+
+    RC(@"[UI] 完成：点球开日志，再点收起，拖动换位置");
+}
+
+#pragma mark - present 时机补建
+
+void RCInstallUIPresentHook(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+
+    Class vcCls = NSClassFromString(@"UIViewController");
+    if (!vcCls) return;
+
+    SEL sel = @selector(presentViewController:animated:completion:);
+    Method m = class_getInstanceMethod(vcCls, sel);
+    if (!m) return;
+
+    IMP orig = method_getImplementation(m);
+    RCStoreIMP(@"UIViewController",
+               @"presentViewController:animated:completion:", orig);
+
+    IMP nb = imp_implementationWithBlock(
+        ^(id self, UIViewController *vc, BOOL animated, void (^comp)(void)) {
+        ((void (*)(id, SEL, UIViewController *, BOOL, void (^)(void)))orig)
+            (self, sel, vc, animated, comp);
+
+        RC_SAFE_BEGIN
+            UIView *v = [self view];
+            UIWindow *w = v ? [v window] : nil;
+            if (w) {
+                g_lastWindow = w;
+                if (!g_ball) {
+                    RC(@"[UI] present 抓到 window，补建 UI");
+                    RCAfterSec(0.4, ^{ RCInstallUIWindow(); });
+                }
+            }
+        RC_SAFE_END
     });
+    class_replaceMethod(vcCls, sel, nb, method_getTypeEncoding(m));
+    RC(@"[UI] present hook 就位");
 }

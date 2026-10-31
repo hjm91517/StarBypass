@@ -13,6 +13,7 @@
 #import "01-shared.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #pragma mark - 方法表 dump
 
@@ -46,6 +47,30 @@ static void rc_dumpMethods(Class cls, BOOL classSide) {
 
 #pragma mark - 观测包装
 
+// 每个选择器每秒最多记录 20 条，防止高频方法刷爆日志与拖慢主线程
+#define RC_TRACE_RATE 20
+
+static BOOL rc_traceAllowed(SEL sel) {
+    static struct { SEL sel; time_t sec; int cnt; } tab[64];
+    static int n = 0;
+    time_t now = time(NULL);
+
+    for (int i = 0; i < n; i++) {
+        if (tab[i].sel != sel) continue;
+        if (tab[i].sec != now) { tab[i].sec = now; tab[i].cnt = 0; }
+        tab[i].cnt++;
+        return tab[i].cnt <= RC_TRACE_RATE;
+    }
+    if (n < 64) {
+        tab[n].sel = sel;
+        tab[n].sec = now;
+        tab[n].cnt = 1;
+        n++;
+        return YES;
+    }
+    return YES;
+}
+
 static const char *rc_retName(char r) {
     return (r == 'v') ? "void" : "BOOL";
 }
@@ -55,9 +80,12 @@ static void rc_wrapBool0(Class cls, Method m, NSString *name) {
     IMP orig = method_getImplementation(m);
     const char *enc = method_getTypeEncoding(m);
 
+    SEL sel = method_getName(m);
     IMP nb = imp_implementationWithBlock(^BOOL(id self) {
-        BOOL r = ((BOOL (*)(id, SEL))orig)(self, NSSelectorFromString(name));
-        RC(@"   ← %@ = %@", name, r ? @"YES" : @"NO");
+        BOOL r = ((BOOL (*)(id, SEL))orig)(self, sel);
+        if (rc_traceAllowed(sel)) {
+            RC(@"   ← %@ = %@", name, r ? @"YES" : @"NO");
+        }
         return r;
     });
     class_replaceMethod(cls, method_getName(m), nb, enc);
@@ -68,10 +96,12 @@ static void rc_wrapBool1(Class cls, Method m, NSString *name) {
     IMP orig = method_getImplementation(m);
     const char *enc = method_getTypeEncoding(m);
 
+    SEL sel = method_getName(m);
     IMP nb = imp_implementationWithBlock(^BOOL(id self, id a) {
-        RC(@"   → %@ %@", name, RCDescribe(a));
-        BOOL r = ((BOOL (*)(id, SEL, id))orig)(self, NSSelectorFromString(name), a);
-        RC(@"   ← %@ = %@", name, r ? @"YES" : @"NO");
+        BOOL r = ((BOOL (*)(id, SEL, id))orig)(self, sel, a);
+        if (rc_traceAllowed(sel)) {
+            RC(@"   → %@ %@ = %@", name, RCDescribe(a), r ? @"YES" : @"NO");
+        }
         return r;
     });
     class_replaceMethod(cls, method_getName(m), nb, enc);
@@ -82,9 +112,10 @@ static void rc_wrapVoid0(Class cls, Method m, NSString *name) {
     IMP orig = method_getImplementation(m);
     const char *enc = method_getTypeEncoding(m);
 
+    SEL sel = method_getName(m);
     IMP nb = imp_implementationWithBlock(^(id self) {
-        RC(@"   → %@", name);
-        ((void (*)(id, SEL))orig)(self, NSSelectorFromString(name));
+        if (rc_traceAllowed(sel)) RC(@"   → %@", name);
+        ((void (*)(id, SEL))orig)(self, sel);
     });
     class_replaceMethod(cls, method_getName(m), nb, enc);
 }
@@ -94,9 +125,10 @@ static void rc_wrapVoid1(Class cls, Method m, NSString *name) {
     IMP orig = method_getImplementation(m);
     const char *enc = method_getTypeEncoding(m);
 
+    SEL sel = method_getName(m);
     IMP nb = imp_implementationWithBlock(^(id self, id a) {
-        RC(@"   → %@ %@", name, RCDescribe(a));
-        ((void (*)(id, SEL, id))orig)(self, NSSelectorFromString(name), a);
+        if (rc_traceAllowed(sel)) RC(@"   → %@ %@", name, RCDescribe(a));
+        ((void (*)(id, SEL, id))orig)(self, sel, a);
     });
     class_replaceMethod(cls, method_getName(m), nb, enc);
 }

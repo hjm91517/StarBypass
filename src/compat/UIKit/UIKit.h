@@ -35,6 +35,8 @@ static inline CGPoint CGPointZero_(void) { return CGPointMake(0, 0); }
 @class CALayer, UIColor, UIFont, UIWindow, UIWindowScene, UIScreen;
 @class UIGestureRecognizer, UIPanGestureRecognizer, UITapGestureRecognizer;
 @class UIScrollView, UIViewController, UIImage, UIPasteboard;
+@class UIPopoverPresentationController;
+@class UIActivityViewController;
 
 @interface CALayer : NSObject
 - (void)setCornerRadius:(CGFloat)r;
@@ -151,6 +153,7 @@ typedef long UIGestureRecognizerState;
 - (instancetype)initWithTarget:(id)t action:(SEL)a;
 - (UIGestureRecognizerState)state;
 - (void)setCancelsTouchesInView:(BOOL)b;
+- (void)requireGestureRecognizerToFail:(UIGestureRecognizer *)g;
 @end
 
 @interface UIPanGestureRecognizer : UIGestureRecognizer
@@ -171,8 +174,12 @@ typedef CGFloat UIWindowLevel;
 @interface UIScene : NSObject
 @end
 
+@interface UICoordinateSpace : NSObject
+- (CGRect)bounds;
+@end
 @interface UIWindowScene : UIScene
 - (NSArray *)windows;
+- (UICoordinateSpace *)coordinateSpace;
 @end
 
 @interface UIScreen : NSObject
@@ -203,6 +210,7 @@ typedef CGFloat UIWindowLevel;
 - (NSString *)title;
 - (UIView *)view;
 - (void)setView:(UIView *)v;
+- (UIViewController *)presentedViewController;
 - (void)presentViewController:(UIViewController *)c
                      animated:(BOOL)an
                    completion:(void (^)(void))done;
@@ -242,6 +250,7 @@ typedef long UIAlertControllerStyle;
 @interface UIActivityViewController : UIViewController
 - (instancetype)initWithActivityItems:(NSArray *)items
                  applicationActivities:(NSArray *)acts;
+- (UIPopoverPresentationController *)popoverPresentationController;
 @end
 
 @interface UIDevice : NSObject
@@ -258,6 +267,11 @@ typedef NSUInteger UIViewAnimationOptions;
 + (void)animateWithDuration:(double)d
                  animations:(void (^)(void))a;
 + (void)animateWithDuration:(double)d
+                 animations:(void (^)(void))a
+                 completion:(void (^)(BOOL))c;
++ (void)animateWithDuration:(double)d
+                      delay:(double)delay
+                    options:(UIViewAnimationOptions)o
                  animations:(void (^)(void))a
                  completion:(void (^)(BOOL))c;
 + (void)animateWithDuration:(double)d
@@ -298,4 +312,9 @@ typedef NSUInteger UIViewAnimationOptions;
 #define UIViewAutoresizingFlexibleWidth  (1 << 1)
 #define UIViewAutoresizingFlexibleHeight (1 << 4)
 
+@interface UIPopoverPresentationController : NSObject
+- (void)setSourceView:(UIView *)v;
+- (void)setSourceRect:(CGRect)r;
+- (void)setPermittedArrowDirections:(NSUInteger)d;
+@end
 #endif
