@@ -99,10 +99,13 @@ cd src && frida -U -f com.shadow.h5ggapp -l tools/dynamic-recon.js
 │   ├── 02-architecture.md      分层设计与扩展点
 │   ├── 03-verification.md      验证记录（含崩溃日志分析）
 │   ├── 04-dynamic-recon.md     动态逆向方法与对照表
+│   ├── 05-ci.md                CI 构建与权限要求
 │   └── verify-contracts.py     契约检查器
 ├── assets/
 │   ├── FlashBytePro.dylib      原始二进制（只读）
 │   └── verify-original.py      指纹校验
+├── .github/workflows/
+│   └── starbpass-build.yml   GitHub Actions：真机 SDK 构建
 └── src/
     ├── Makefile
     ├── 00-config.h             配置 + 构建标识
@@ -123,6 +126,19 @@ cd src && frida -U -f com.shadow.h5ggapp -l tools/dynamic-recon.js
 ```
 
 ---
+
+## CI 构建（推荐）
+
+本地构建靠 `compat/` 桩头和手工注入 `LC_LOAD_DYLIB`，真 SDK 下这些全都不需要。
+`.github/workflows/starbpass-build.yml` 用 `macos-14` + 官方 iPhoneOS SDK 构建。
+
+```bash
+# 推到任意分支即触发
+git push origin main:starbpass
+```
+
+**当前该 Token 无写权限**（建库/写文件/触发均 403），需要补
+`Contents: write` + `Workflows: write`。详见 [docs/05-ci.md](docs/05-ci.md)。
 
 ## 命令
 

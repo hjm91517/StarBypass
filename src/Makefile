@@ -33,7 +33,7 @@ CFLAGS_COMMON := -fblocks -fno-objc-arc -Wall -Wextra -Wno-unused-parameter \
                  -Wno-deprecated-declarations -I. -Ilib
 
 # ── 真机构建：需要 macOS + Xcode ──
-CFLAGS_IOS  := -arch $(ARCH) -miphoneos-version-min=$(IOS_MIN) $(CFLAGS_COMMON)
+CFLAGS_IOS  := -arch $(ARCH) -miphoneos-version-min=$(IOS_MIN) $(CFLAGS_COMMON) -fobjc-arc
 LDFLAGS_IOS := -dynamiclib -arch $(ARCH) -miphoneos-version-min=$(IOS_MIN) \
                -framework Foundation -framework UIKit -lobjc -lSystem \
                -Wl,-no_fixup_chains \

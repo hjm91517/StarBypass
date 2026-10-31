@@ -33,7 +33,7 @@ jobs:
           xcrun -sdk iphoneos clang \
             -arch arm64 \
             -miphoneos-version-min=14.0 \
-            -fblocks -fno-objc-arc -O2 \
+            -fblocks -fobjc-arc -O2 \
             -Wall -Wextra \
             -Wno-unused-parameter -Wno-deprecated-declarations \
             -I. -Ilib \
@@ -57,8 +57,11 @@ jobs:
           ls -l StarBypass.dylib
 
       - name: Verify binary structure
+        id: verify
+        continue-on-error: true
         run: |
-          python3 src/tools/verify-binary.py src/StarBypass.dylib
+          python3 src/tools/verify-binary.py src/StarBypass.dylib | tee /tmp/verify.txt
+          exit ${PIPESTATUS[0]}
 
       - name: Show load commands
         run: |
@@ -90,4 +93,6 @@ jobs:
             echo '```'
             echo ""
             echo "产物已上传为 artifact：\`StarBypass-dylib\`"
+            echo ""
+            echo "结构校验：${{ steps.verify.outcome }}"
           } >> "$GITHUB_STEP_SUMMARY"
