@@ -191,6 +191,32 @@ $ python3 /skills/senior-scaffold/scripts/scaffold_check.py .
 
 **不会为了通过检查去伪造 `pyproject.toml`** —— 那属于反模式里的「伪框架」，比一条误报 FAIL 危害大得多。
 
+另有两条同源误报：
+
+| 告警 | 原因 | 处理 |
+|---|---|---|
+| `C3 疑似空壳目录: .github/workflows` | 该目录按 GitHub 规范只能放 YAML，而脚本的 `CODE_EXTS` 不含 `.yml` | 已加 `.github/lint-workflow.py` 使 `.github` 通过；`workflows/` 无解，属工具限制 |
+| `C1 缺少依赖清单` | 白名单只有 Python / Node / Go / Rust 生态 | 见上，依赖清单为 `deps.txt` |
+
+三条告警同一根因：**脚本的允许列表不覆盖 C / Objective-C / Make / GitHub Actions 工程**。
+工程本身无缺陷，不为过检而造文件。
+
+## 十二、CI 工作流校验（已执行，通过）
+
+```
+$ python3 .github/lint-workflow.py
+=== 工作流校验 ===
+[starbpass-build.yml]
+  PASS W1 YAML 可解析
+  PASS W2 name / on / jobs 齐全
+  PASS W3/W4 1 个 job 结构完整
+  PASS W5 2 个脚本引用全部存在
+  PASS W6 8 个构建源文件全部存在
+结果: 全部通过
+```
+
+`W6` 会核对工作流里列出的源文件是否真实存在，能在推送前拦下改名漏改的情况。
+
 
 ---
 
